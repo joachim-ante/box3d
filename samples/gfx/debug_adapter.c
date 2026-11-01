@@ -225,6 +225,8 @@ void ApplyGuiFlags( b3DebugDraw* out )
 	out->drawJoints = s_adapter.guiDraw.drawJoints;
 	out->drawJointExtras = s_adapter.guiDraw.drawJointExtras;
 	out->drawBounds = s_adapter.guiDraw.drawBounds;
+	out->drawDynamicTree = s_adapter.guiDraw.drawDynamicTree;
+	out->drawStaticTree = s_adapter.guiDraw.drawStaticTree;
 	out->drawMass = s_adapter.guiDraw.drawMass;
 	out->drawSleep = s_adapter.guiDraw.drawSleep;
 	out->drawBodyNames = s_adapter.guiDraw.drawBodyNames;

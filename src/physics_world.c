@@ -1416,6 +1416,17 @@ void b3World_Draw( b3WorldId worldId, b3DebugDraw* draw, uint64_t maskBits )
 		b3DynamicTree_Query( world->broadPhase.trees + i, draw->drawingBounds, maskBits, false, DrawQueryCallback, &drawContext );
 	}
 
+	if ( draw->drawStaticTree )
+	{
+		b3DrawDynamicTree( world->broadPhase.trees + b3_staticBody, draw );
+		b3DrawDynamicTree( world->broadPhase.trees + b3_kinematicBody, draw );
+	}
+
+	if ( draw->drawDynamicTree )
+	{
+		b3DrawDynamicTree( world->broadPhase.trees + b3_dynamicBody, draw );
+	}
+
 	uint32_t wordCount = world->debugBodySet.blockCount;
 	uint64_t* bits = world->debugBodySet.bits;
 	for ( uint32_t wordIndex = 0; wordIndex < wordCount; ++wordIndex )

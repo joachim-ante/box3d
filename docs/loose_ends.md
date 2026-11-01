@@ -86,6 +86,8 @@ Category flags on the struct control what gets drawn:
 | `drawJoints` | Joint frames and constraints |
 | `drawJointExtras` | Extra joint information (limits, motors) |
 | `drawBounds` | Shape AABBs |
+| `drawDynamicTree` | Dynamic body broad-phase tree: node boxes by depth, shape boxes by leaf node with spokes to the node center |
+| `drawStaticTree` | Static and kinematic body broad-phase trees, drawn the same way |
 | `drawMass` | Center-of-mass marker and mass value for dynamic bodies |
 | `drawBodyNames` | Body name strings |
 | `drawContacts` | Contact points and anchors |

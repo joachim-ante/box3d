@@ -139,3 +139,6 @@ void b3DynamicTree_MarkProxyMovedSerial( b3DynamicTree* tree, int proxyId );
 void b3DynamicTree_MarkProxyMoved( b3DynamicTree* tree, int proxyId, b3AABB aabb );
 void b3DynamicTree_ClearMoved( b3DynamicTree* tree );
 void b3DynamicTree_Refit( b3DynamicTree* tree );
+
+// Draw the lanes of the internal nodes inside the drawing bounds, colored by depth
+void b3DrawDynamicTree( const b3DynamicTree* tree, b3DebugDraw* draw );

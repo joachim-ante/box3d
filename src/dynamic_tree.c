@@ -2364,6 +2364,95 @@ void b3DynamicTree_Refit( b3DynamicTree* tree )
 	}
 }
 
+// Every lane of an internal node is a box in the tree, colored by depth so the levels stand
+// apart. The lanes of a leaf node are the shape boxes. They take a color from the leaf node
+// index and get a spoke to the center of their node box, so the shapes sharing a node are easy
+// to see.
+void b3DrawDynamicTree( const b3DynamicTree* tree, b3DebugDraw* draw )
+{
+	static const b3HexColor depthColors[] = {
+		b3_colorRed,	b3_colorOrange,	 b3_colorYellow, b3_colorLime,	   b3_colorCyan,	  b3_colorDodgerBlue,
+		b3_colorViolet, b3_colorMagenta, b3_colorCoral,	 b3_colorGoldenRod, b3_colorSeaGreen, b3_colorPlum,
+	};
+	const int depthColorCount = sizeof( depthColors ) / sizeof( depthColors[0] );
+
+	static const b3HexColor leafColors[] = {
+		b3_colorHotPink,	b3_colorSpringGreen, b3_colorDeepSkyBlue, b3_colorTomato,	 b3_colorGold,	  b3_colorAquamarine,
+		b3_colorLightSalmon, b3_colorChartreuse, b3_colorOrchid,	  b3_colorKhaki,	 b3_colorTurquoise, b3_colorPeachPuff,
+		b3_colorPaleGreen,	b3_colorLightSkyBlue, b3_colorThistle,	  b3_colorSandyBrown,
+	};
+	const int leafColorCount = sizeof( leafColors ) / sizeof( leafColors[0] );
+
+	if ( tree->proxyCount == 0 )
+	{
+		return;
+	}
+
+	const b3WideNode* nodes = tree->nodes;
+	b3BoxW4 query = b3SplatBoxW4( draw->drawingBounds );
+
+	struct
+	{
+		int index;
+		int depth;
+	} stack[B3_TREE_STACK_SIZE];
+
+	int stackCount = 0;
+	stack[stackCount].index = B3_ROOT_NODE;
+	stack[stackCount].depth = 0;
+	stackCount += 1;
+
+	while ( stackCount > 0 )
+	{
+		stackCount -= 1;
+		int index = stack[stackCount].index;
+		int depth = stack[stackCount].depth;
+		const b3WideNode* node = nodes + index;
+
+		b3BoxW4 boxes = b3LoadBoxW4( node );
+		int mask = b3OverlapMaskW4( &query, &boxes );
+
+		if ( b3IsLeaf( node ) )
+		{
+			b3HexColor color = leafColors[index % leafColorCount];
+			b3Pos center = b3ToPos( b3AABB_Center( b3GetSubtreeAABB( node ) ) );
+			while ( mask != 0 )
+			{
+				int lane = (int)b3CTZ32( (uint32_t)mask );
+				mask &= mask - 1;
+
+				b3AABB laneBox = b3GetLaneAABB( node, lane );
+				draw->DrawBoundsFcn( laneBox, color, draw->context );
+				draw->DrawSegmentFcn( b3ToPos( b3AABB_Center( laneBox ) ), center, color, draw->context );
+			}
+
+			draw->DrawPointFcn( center, 5.0f, color, draw->context );
+			continue;
+		}
+
+		b3HexColor color = depthColors[depth % depthColorCount];
+
+		while ( mask != 0 )
+		{
+			int lane = (int)b3CTZ32( (uint32_t)mask );
+			mask &= mask - 1;
+
+			draw->DrawBoundsFcn( b3GetLaneAABB( node, lane ), color, draw->context );
+
+			if ( stackCount < B3_TREE_STACK_SIZE )
+			{
+				stack[stackCount].index = b3GetLaneIndex( node->child[lane] );
+				stack[stackCount].depth = depth + 1;
+				stackCount += 1;
+			}
+			else
+			{
+				B3_ASSERT( stackCount < B3_TREE_STACK_SIZE );
+			}
+		}
+	}
+}
+
 static FILE* b3OpenTreeFile( const char* fileName, const char* mode )
 {
 	FILE* file = NULL;

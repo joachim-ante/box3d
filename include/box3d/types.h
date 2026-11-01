@@ -3210,6 +3210,13 @@ typedef struct b3DebugDraw
 	/// Option to draw the bounding boxes for shapes
 	bool drawBounds;
 
+	/// Option to draw the dynamic body broad-phase tree. Internal node lanes are colored by depth. Leaf lanes are
+	/// the shape boxes, colored by their leaf node with a spoke to the node center.
+	bool drawDynamicTree;
+
+	/// Option to draw the static and kinematic body broad-phase trees in the same way.
+	bool drawStaticTree;
+
 	/// Option to draw the mass and center of mass of dynamic bodies
 	bool drawMass;
 

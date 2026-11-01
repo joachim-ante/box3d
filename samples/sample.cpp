@@ -1817,6 +1817,8 @@ static void DrawMenuBar( SampleContext* context )
 			ImGui::MenuItem( "Joints", nullptr, &gd->drawJoints );
 			ImGui::MenuItem( "Joint Extras", nullptr, &gd->drawJointExtras );
 			ImGui::MenuItem( "Bounds", nullptr, &gd->drawBounds );
+			ImGui::MenuItem( "Dynamic Tree", nullptr, &gd->drawDynamicTree );
+			ImGui::MenuItem( "Static Tree", nullptr, &gd->drawStaticTree );
 			ImGui::MenuItem( "Mass", nullptr, &gd->drawMass );
 			ImGui::MenuItem( "Sleep", nullptr, &gd->drawSleep );
 			ImGui::MenuItem( "Body Names", nullptr, &gd->drawBodyNames );
