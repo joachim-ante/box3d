@@ -117,8 +117,8 @@ B3_FORCE_INLINE b3FloatW4 b3DistanceSqrW4( b3FloatW4 px, b3FloatW4 py, b3FloatW4
 
 // Slab test of a ray against four boxes. The reciprocal direction must be finite so the products
 // never produce NaN. Returns a bit per hit lane and the entry fraction per lane.
-B3_FORCE_INLINE int b3RayMaskW4( b3Vec3 origin, b3Vec3 invDirection, float maxFraction, const b3BoxW4* boxes,
-								 b3FloatW4* nearFractions )
+B3_FORCE_INLINE b3FloatW4 b3RayMaskW4( b3Vec3 origin, b3Vec3 invDirection, float maxFraction, const b3BoxW4* boxes,
+									   b3FloatW4* nearFractions )
 {
 	b3FloatW4 ox = b3SplatW4( origin.x );
 	b3FloatW4 oy = b3SplatW4( origin.y );
@@ -139,8 +139,7 @@ B3_FORCE_INLINE int b3RayMaskW4( b3Vec3 origin, b3Vec3 invDirection, float maxFr
 		b3MinW4( b3MinW4( b3MaxW4( t1x, t2x ), b3MaxW4( t1y, t2y ) ), b3MinW4( b3MaxW4( t1z, t2z ), b3SplatW4( maxFraction ) ) );
 
 	*nearFractions = nearT;
-	b3FloatW4 mask = b3AndW4( b3LessEqW4( nearT, farT ), b3LessEqW4( boxes->lowerX, boxes->upperX ) );
-	return b3MoveMaskW4( mask );
+	return b3AndW4( b3LessEqW4( nearT, farT ), b3LessEqW4( boxes->lowerX, boxes->upperX ) );
 }
 
 // Finite reciprocal that cannot make NaN with a zero numerator
@@ -1180,8 +1179,64 @@ typedef struct b3TreeHit
 // two low mantissa bits through a five exchange sorting network and the misses sort last. All
 // four hits are written, the count says how many are real. The values are read back from the
 // unmodified lanes so the hit values are exact.
-B3_FORCE_INLINE int b3SortHits( int mask, b3FloatW4 values, b3TreeHit* hits )
+#if defined( B3_SIMD_NEON )
+
+// NEON version of the sort below. The keys never leave the vector registers: the lane index
+// is embedded, the misses are forced to all ones from the vector mask, the five exchange
+// network runs on permuted copies with unsigned min and max, and the sorted values are
+// gathered back from the unmodified lanes with a byte shuffle so they stay exact.
+B3_FORCE_INLINE int b3SortHits( b3FloatW4 mask, b3FloatW4 values, b3TreeHit* hits )
 {
+	static const uint32_t laneIndex[4] = { 0, 1, 2, 3 };
+	static const uint8_t swapMiddle[16] = { 0, 1, 2, 3, 8, 9, 10, 11, 4, 5, 6, 7, 12, 13, 14, 15 };
+	static const uint32_t selectLane2[4] = { 0, 0, 0xFFFFFFFFu, 0 };
+
+	uint32x4_t hit = vreinterpretq_u32_f32( mask );
+	uint32x4_t keys = vorrq_u32( vbicq_u32( vreinterpretq_u32_f32( values ), vdupq_n_u32( 3 ) ), vld1q_u32( laneIndex ) );
+	keys = vornq_u32( keys, hit );
+
+	// The nearest lane is all the descent needs, and a horizontal min gets it in one step
+	// instead of waiting for the three stages of the network
+	uint32_t nearest = vminvq_u32( keys );
+
+	// (0,1) (2,3)
+	uint32x4_t partner = vrev64q_u32( keys );
+	uint32x4_t lo = vminq_u32( keys, partner );
+	uint32x4_t hi = vmaxq_u32( keys, partner );
+	keys = vtrn1q_u32( lo, hi );
+
+	// (0,2) (1,3)
+	partner = vextq_u32( keys, keys, 2 );
+	lo = vminq_u32( keys, partner );
+	hi = vmaxq_u32( keys, partner );
+	keys = vextq_u32( lo, hi, 2 );
+
+	// (1,2)
+	partner = vreinterpretq_u32_u8( vqtbl1q_u8( vreinterpretq_u8_u32( keys ), vld1q_u8( swapMiddle ) ) );
+	lo = vminq_u32( keys, partner );
+	hi = vmaxq_u32( keys, partner );
+	keys = vbslq_u32( vld1q_u32( selectLane2 ), hi, lo );
+
+	// Gather the exact values by sorted lane
+	uint32x4_t lanes = vandq_u32( keys, vdupq_n_u32( 3 ) );
+	uint32x4_t control =
+		vaddq_u32( vmulq_u32( vshlq_n_u32( lanes, 2 ), vdupq_n_u32( 0x01010101u ) ), vdupq_n_u32( 0x03020100u ) );
+	uint32x4_t sorted = vreinterpretq_u32_u8( vqtbl1q_u8( vreinterpretq_u8_f32( values ), vreinterpretq_u8_u32( control ) ) );
+
+	uint32_t* out = (uint32_t*)hits;
+	vst1q_u32( out, vzip1q_u32( lanes, sorted ) );
+	vst1q_u32( out + 4, vzip2q_u32( lanes, sorted ) );
+
+	hits[0].lane = (int)( nearest & 3 );
+
+	return (int)vaddvq_u32( vshrq_n_u32( hit, 31 ) );
+}
+
+#else
+
+B3_FORCE_INLINE int b3SortHits( b3FloatW4 maskW, b3FloatW4 values, b3TreeHit* hits )
+{
+	int mask = b3MoveMaskW4( maskW );
 	float lanes[4];
 	b3StoreW4( lanes, values );
 
@@ -1212,6 +1267,8 @@ B3_FORCE_INLINE int b3SortHits( int mask, b3FloatW4 values, b3TreeHit* hits )
 
 	return b3LaneCountW4( mask );
 }
+
+#endif
 
 typedef struct b3QueryClosestItem
 {
@@ -1249,7 +1306,7 @@ B3_FORCE_INLINE b3TreeStats b3QueryClosestTreeView( const b3TreeView* view, b3Ve
 
 		b3BoxW4 boxes = b3LoadBoxW4( node );
 		b3FloatW4 distances = b3DistanceSqrW4( px, py, pz, &boxes );
-		int mask = b3MoveMaskW4( b3LessThanW4( distances, b3SplatW4( minSqr ) ) );
+		b3FloatW4 mask = b3LessThanW4( distances, b3SplatW4( minSqr ) );
 
 		// Closest first so the minimum narrows quickly
 		b3TreeHit hits[4];
@@ -1343,73 +1400,86 @@ B3_FORCE_INLINE b3TreeStats b3RayCastTreeView( const b3TreeView* view, const b3R
 			continue;
 		}
 
-		const b3WideNode* node = nodes + item.nodeIndex;
-		result.nodeVisits += 1;
-
-		b3BoxW4 boxes = b3LoadBoxW4( node );
-		b3FloatW4 fractions;
-		int mask = b3RayMaskW4( origin, invDirection, maxFraction, &boxes, &fractions );
-
-		b3TreeHit hits[4];
-		int hitCount = b3SortHits( mask, fractions, hits );
-
-		if ( b3IsLeaf( node ) )
+		// Descend straight into the nearest child at each level. Only the farther children go
+		// through the stack, so the next node load does not wait on a store and a pop.
+		int nodeIndex = item.nodeIndex;
+		for ( ;; )
 		{
-			for ( int i = 0; i < hitCount; ++i )
-			{
-				if ( hits[i].value > maxFraction )
-				{
-					break;
-				}
+			const b3WideNode* node = nodes + nodeIndex;
+			result.nodeVisits += 1;
 
-				int lane = hits[i].lane;
-				int proxyId = b3GetLaneIndex( node->child[lane] );
-				uint64_t userData = node->userData[lane];
-				if ( hasProxies )
+			b3BoxW4 boxes = b3LoadBoxW4( node );
+			b3FloatW4 fractions;
+			b3FloatW4 mask = b3RayMaskW4( origin, invDirection, maxFraction, &boxes, &fractions );
+
+			b3TreeHit hits[4];
+			int hitCount = b3SortHits( mask, fractions, hits );
+
+			if ( b3IsLeaf( node ) )
+			{
+				for ( int i = 0; i < hitCount; ++i )
 				{
-					const b3TreeProxy* proxy = view->proxies + proxyId;
-					if ( b3TestCategory( proxy->categoryBits, maskBits, requireAllBits ) == false )
+					if ( hits[i].value > maxFraction )
 					{
-						continue;
+						break;
 					}
-					userData = proxy->userData;
+
+					int lane = hits[i].lane;
+					int proxyId = b3GetLaneIndex( node->child[lane] );
+					uint64_t userData = node->userData[lane];
+					if ( hasProxies )
+					{
+						const b3TreeProxy* proxy = view->proxies + proxyId;
+						if ( b3TestCategory( proxy->categoryBits, maskBits, requireAllBits ) == false )
+						{
+							continue;
+						}
+						userData = proxy->userData;
+					}
+
+					subInput.maxFraction = maxFraction;
+
+					float value = callback( &subInput, proxyId, userData, context );
+					result.leafVisits += 1;
+
+					// The user may return -1 to indicate this shape should be skipped
+
+					if ( value == 0.0f )
+					{
+						// The client has terminated the ray cast.
+						return result;
+					}
+
+					if ( 0.0f < value && value <= maxFraction )
+					{
+						maxFraction = value;
+					}
 				}
 
-				subInput.maxFraction = maxFraction;
-
-				float value = callback( &subInput, proxyId, userData, context );
-				result.leafVisits += 1;
-
-				// The user may return -1 to indicate this shape should be skipped
-
-				if ( value == 0.0f )
-				{
-					// The client has terminated the ray cast.
-					return result;
-				}
-
-				if ( 0.0f < value && value <= maxFraction )
-				{
-					maxFraction = value;
-				}
+				break;
 			}
-		}
-		else
-		{
-			if ( stackCount + hitCount > B3_TREE_STACK_SIZE )
+
+			if ( hitCount == 0 )
 			{
-				B3_ASSERT( stackCount + hitCount <= B3_TREE_STACK_SIZE );
-				continue;
+				break;
 			}
 
-			// Push the farthest first so the closest pops first. The pushed nodes are prefetched
-			// so the sibling loads overlap the test of the nearest.
-			for ( int i = hitCount - 1; i >= 0; --i )
+			if ( stackCount + hitCount - 1 > B3_TREE_STACK_SIZE )
+			{
+				B3_ASSERT( stackCount + hitCount - 1 <= B3_TREE_STACK_SIZE );
+				break;
+			}
+
+			// Push the farther children, farthest first. The pushed nodes are prefetched so the
+			// sibling loads overlap the test of the nearest.
+			for ( int i = hitCount - 1; i >= 1; --i )
 			{
 				int childIndex = b3GetLaneIndex( node->child[hits[i].lane] );
 				b3PrefetchNode( nodes + childIndex );
 				stack[stackCount++] = B3_LITERAL( b3CastItem ){ childIndex, hits[i].value };
 			}
+
+			nodeIndex = b3GetLaneIndex( node->child[hits[0].lane] );
 		}
 	}
 
@@ -1465,7 +1535,7 @@ B3_FORCE_INLINE b3TreeStats b3BoxCastTreeView( const b3TreeView* view, const b3B
 		boxes.lowerZ = b3SubW4( boxes.lowerZ, sz );
 
 		b3FloatW4 fractions;
-		int mask = b3RayMaskW4( origin, invDirection, maxFraction, &boxes, &fractions );
+		b3FloatW4 mask = b3RayMaskW4( origin, invDirection, maxFraction, &boxes, &fractions );
 
 		b3TreeHit hits[4];
 		int hitCount = b3SortHits( mask, fractions, hits );
