@@ -52,6 +52,12 @@ float GetSpinnerAngle( void );
 void GetSleepCapacity( b3Capacity* capacity );
 void CreateSleep( b3WorldId worldId );
 void StepSleep( b3WorldId worldId, int stepCount );
+void GetRayCastCapacity( b3Capacity* capacity );
+void CreateRayCast( b3WorldId worldId );
+void StepRayCast( b3WorldId worldId, int stepIndex );
+void GetRayCastSparseCapacity( b3Capacity* capacity );
+void CreateRayCastSparse( b3WorldId worldId );
+void StepRayCastSparse( b3WorldId worldId, int stepIndex );
 
 #define VILLAGE_STEP_COUNT 600
 

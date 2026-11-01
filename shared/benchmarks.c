@@ -8,6 +8,8 @@
 
 #include "box3d/box3d.h"
 
+#include "physics_world.h"
+
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1612,4 +1614,125 @@ void DestroyVillage( void )
 {
 	b3DestroyCompound( g_villageData.compound );
 	memset( &g_villageData, 0, sizeof( g_villageData ) );
+}
+
+// Ray casts against a field of static shapes. Nothing moves, so the world step is nearly free
+// and the step function does the work: it casts RAY_CAST_COUNT rays through the field.
+#define RAY_CAST_SHAPE_COUNT 10000
+#define RAY_CAST_COUNT 10000
+#define RAY_CAST_HALF_EXTENT 50.0f
+#define RAY_CAST_LENGTH 50.0f
+
+// Sparse variant: many more shapes spread over a 4 km cube so that most rays miss everything
+// and the cost is dominated by tree traversal rather than shape tests.
+#define RAY_CAST_SPARSE_SHAPE_COUNT 100000
+#define RAY_CAST_SPARSE_HALF_EXTENT 2000.0f
+#define RAY_CAST_SPARSE_LENGTH 500.0f
+
+// Fill a cube of half extent h with an even mix of random spheres, capsules, and boxes whose
+// radius or half extent lies in [minSize, maxSize].
+static void CreateRayCastField( b3WorldId worldId, int shapeCount, float h, float minSize, float maxSize )
+{
+	g_randomSeed = RAND_SEED;
+
+	b3Vec3 lo = { -h, -h, -h };
+	b3Vec3 hi = { h, h, h };
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+
+	for ( int i = 0; i < shapeCount; ++i )
+	{
+		bodyDef.position = RandomPos( lo, hi );
+		bodyDef.rotation = RandomQuat();
+		b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+
+		int type = i % 3;
+		if ( type == 0 )
+		{
+			b3Sphere sphere = { b3Vec3_zero, RandomFloatRange( minSize, maxSize ) };
+			b3CreateSphereShape( bodyId, &shapeDef, &sphere );
+		}
+		else if ( type == 1 )
+		{
+			float halfLength = RandomFloatRange( minSize, maxSize );
+			float radius = RandomFloatRange( 0.5f * minSize, 0.5f * maxSize );
+			b3Capsule capsule = { { 0.0f, -halfLength, 0.0f }, { 0.0f, halfLength, 0.0f }, radius };
+			b3CreateCapsuleShape( bodyId, &shapeDef, &capsule );
+		}
+		else
+		{
+			b3BoxHull box = b3MakeBoxHull( RandomFloatRange( minSize, maxSize ), RandomFloatRange( minSize, maxSize ),
+										   RandomFloatRange( minSize, maxSize ) );
+			b3CreateHullShape( bodyId, &shapeDef, &box.base );
+		}
+	}
+
+	// Static proxies are only inserted incrementally. A full build gives the tree the query
+	// performance the ray casts are meant to measure.
+	b3World_RebuildStaticTree( worldId );
+}
+
+// Cast rayCount rays of the given length from random origins inside the cube of half extent h.
+// Returns the number of rays that hit something.
+static int CastRayField( b3WorldId worldId, int stepIndex, int rayCount, float h, float length )
+{
+	// Reseed per step so every run casts the same rays and the results are comparable
+	g_randomSeed = RAND_SEED + (uint32_t)stepIndex + 1;
+
+	b3Vec3 lo = { -h, -h, -h };
+	b3Vec3 hi = { h, h, h };
+	b3QueryFilter filter = b3DefaultQueryFilter();
+
+	int hitCount = 0;
+	for ( int i = 0; i < rayCount; ++i )
+	{
+		b3Pos origin = RandomPos( lo, hi );
+		b3Vec3 translation = b3MulSV( length, b3Normalize( RandomUnitVector() ) );
+		b3RayResult result = b3World_CastRayClosest( worldId, origin, translation, filter );
+		hitCount += result.hit ? 1 : 0;
+	}
+
+	return hitCount;
+}
+
+void GetRayCastCapacity( b3Capacity* capacity )
+{
+	capacity->staticShapeCount = RAY_CAST_SHAPE_COUNT;
+	capacity->staticBodyCount = RAY_CAST_SHAPE_COUNT;
+}
+
+void CreateRayCast( b3WorldId worldId )
+{
+	CreateRayCastField( worldId, RAY_CAST_SHAPE_COUNT, RAY_CAST_HALF_EXTENT, 0.5f, 2.0f );
+}
+
+void StepRayCast( b3WorldId worldId, int stepIndex )
+{
+	int hitCount = CastRayField( worldId, stepIndex, RAY_CAST_COUNT, RAY_CAST_HALF_EXTENT, RAY_CAST_LENGTH );
+
+	// The field is dense enough that most rays should hit something
+	assert( hitCount > RAY_CAST_COUNT / 2 );
+	(void)hitCount;
+}
+
+void GetRayCastSparseCapacity( b3Capacity* capacity )
+{
+	capacity->staticShapeCount = RAY_CAST_SPARSE_SHAPE_COUNT;
+	capacity->staticBodyCount = RAY_CAST_SPARSE_SHAPE_COUNT;
+}
+
+void CreateRayCastSparse( b3WorldId worldId )
+{
+	// Building sized shapes. With 100k of them in a 4 km cube a 500 m ray hits roughly one time in ten.
+	CreateRayCastField( worldId, RAY_CAST_SPARSE_SHAPE_COUNT, RAY_CAST_SPARSE_HALF_EXTENT, 2.0f, 10.0f );
+}
+
+void StepRayCastSparse( b3WorldId worldId, int stepIndex )
+{
+	int hitCount = CastRayField( worldId, stepIndex, RAY_CAST_COUNT, RAY_CAST_SPARSE_HALF_EXTENT, RAY_CAST_SPARSE_LENGTH );
+
+	// The field is sparse by design: between 5% and 20% of the rays should hit something
+	assert( hitCount >= RAY_CAST_COUNT / 20 && hitCount <= RAY_CAST_COUNT / 5 );
+	(void)hitCount;
 }

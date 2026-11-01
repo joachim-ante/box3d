@@ -230,6 +230,8 @@ int main( int argc, char** argv )
 		{ "many_pyramids", NULL, CreateManyPyramids, NULL, NULL, 100 },
 		{ "mesh_drop", NULL, CreateMeshDropBenchmark, DestroyMeshDropBenchmark, NULL, 170 },
 		{ "rain", GetRainCapacity, CreateRain, DestroyRain, StepRain, 400 },
+		{ "ray_cast", GetRayCastCapacity, CreateRayCast, NULL, StepRayCast, 100 },
+		{ "ray_cast_sparse", GetRayCastSparseCapacity, CreateRayCastSparse, NULL, StepRayCastSparse, 100 },
 		{ "sleep", GetSleepCapacity, CreateSleep, NULL, StepSleep, 300 },
 		{ "spinner", GetSpinnerCapacity, CreateSpinner, DestroySpinner, NULL, 800 },
 		{ "trees100", NULL, CreateTrees100, DestroyTrees, NULL, 500 },
