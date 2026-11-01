@@ -2645,51 +2645,40 @@ b3CastOutput b3RayCastHull( const b3HullData* shape, const b3RayCastInput* input
 	B3_ASSERT( b3IsValidRay( input ) );
 	b3CastOutput output = { 0 };
 
+	// Clip the segment against every face plane. The loop is branch free: the entering and
+	// exiting fractions update through selects, so the face count is the only thing the branch
+	// predictor has to learn. A segment parallel to a plane and outside of it can never enter,
+	// which is recorded by collapsing the exit fraction.
 	float lower = 0.0f;
 	float upper = input->maxFraction;
 	int bestFace = B3_NULL_INDEX;
 
 	const b3Plane* planes = b3GetHullPlanes( shape );
+	int faceCount = shape->faceCount;
 
-	for ( int faceIndex = 0; faceIndex < shape->faceCount; ++faceIndex )
+	for ( int faceIndex = 0; faceIndex < faceCount; ++faceIndex )
 	{
 		b3Plane plane = planes[faceIndex];
 
 		float distance = plane.offset - b3Dot( plane.normal, input->origin );
 		float denominator = b3Dot( plane.normal, input->translation );
 
-		if ( denominator == 0.0f )
-		{
-			if ( distance < 0.0f )
-			{
-				return output;
-			}
-		}
-		else
-		{
-			float fraction = distance / denominator;
+		bool parallel = denominator == 0.0f;
+		float fraction = distance / ( parallel ? 1.0f : denominator );
 
-			if ( denominator < 0.0f )
-			{
-				if ( fraction > lower )
-				{
-					bestFace = faceIndex;
-					lower = fraction;
-				}
-			}
-			else
-			{
-				if ( fraction < upper )
-				{
-					upper = fraction;
-				}
-			}
+		bool enter = denominator < 0.0f && fraction > lower;
+		bool exit = denominator > 0.0f && fraction < upper;
+		bool blocked = parallel && distance < 0.0f;
 
-			if ( upper < lower )
-			{
-				return output;
-			}
-		}
+		bestFace = enter ? faceIndex : bestFace;
+		lower = enter ? fraction : lower;
+		upper = exit ? fraction : upper;
+		upper = blocked ? -1.0f : upper;
+	}
+
+	if ( upper < lower )
+	{
+		return output;
 	}
 
 	if ( bestFace >= 0 )

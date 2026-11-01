@@ -880,8 +880,12 @@ b3CastOutput b3RayCastShape( const b3Shape* shape, b3Transform transform, const 
 			return output;
 	}
 
-	output.point = b3TransformPoint( transform, output.point );
-	output.normal = b3RotateVector( transform.q, output.normal );
+	if ( output.hit )
+	{
+		output.point = b3TransformPoint( transform, output.point );
+		output.normal = b3RotateVector( transform.q, output.normal );
+	}
+
 	return output;
 }
 
