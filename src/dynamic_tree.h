@@ -47,8 +47,7 @@ B3_FORCE_INLINE int b3GetLaneIndex( uint32_t child )
 // Bit per lane that is moved
 B3_FORCE_INLINE int b3GetMovedMask( const b3WideNode* node )
 {
-	return (int)( ( ( node->child[0] >> 30 ) & 1 ) | ( ( node->child[1] >> 29 ) & 2 ) | ( ( node->child[2] >> 28 ) & 4 ) |
-				  ( ( node->child[3] >> 27 ) & 8 ) );
+	return b3BitMaskU32W4( node->child, 30 );
 }
 
 B3_FORCE_INLINE bool b3HasMovedLane( const b3WideNode* node )
@@ -85,7 +84,18 @@ B3_FORCE_INLINE b3BoxW4 b3LoadBoxW4( const b3WideNode* node )
 	return boxes;
 }
 
-// One lane of a node in every lane
+// One lane of loaded boxes in every lane. The lane must be a compile time constant so the
+// splats are register shuffles rather than reloads.
+#define B3_LANE_BOX_W4( BOXES, LANE )                                                                                            \
+	B3_LITERAL( b3BoxW4 )                                                                                                        \
+	{                                                                                                                            \
+		.lowerX = b3SplatLaneW4( ( BOXES ).lowerX, LANE ), .upperX = b3SplatLaneW4( ( BOXES ).upperX, LANE ),                    \
+		.lowerY = b3SplatLaneW4( ( BOXES ).lowerY, LANE ), .upperY = b3SplatLaneW4( ( BOXES ).upperY, LANE ),                    \
+		.lowerZ = b3SplatLaneW4( ( BOXES ).lowerZ, LANE ), .upperZ = b3SplatLaneW4( ( BOXES ).upperZ, LANE ),                    \
+	}
+
+// One lane of a node in every lane, reloaded from memory. For the cold paths where the lane
+// is a runtime value.
 B3_FORCE_INLINE b3BoxW4 b3LaneBoxW4( const b3WideNode* node, int lane )
 {
 	b3BoxW4 boxes;
@@ -98,6 +108,19 @@ B3_FORCE_INLINE b3BoxW4 b3LaneBoxW4( const b3WideNode* node, int lane )
 	return boxes;
 }
 
+// Push the lanes in the mask onto a node stack. Four slots are always written, so the caller
+// reserves four. The child words keep their flags and are masked when popped.
+B3_FORCE_INLINE int b3PushLanesW4( uint32_t* stack, int stackCount, const b3WideNode* node, int mask )
+{
+	return stackCount + b3CompressLanesW4( stack + stackCount, node->child, mask );
+}
+
+// Node index of a popped stack word
+B3_FORCE_INLINE int b3PopNodeIndex( uint32_t word )
+{
+	return (int)( word & B3_NODE_INDEX_MASK );
+}
+
 // Bit per lane where the query box overlaps the lane box. Empty lanes never overlap.
 B3_FORCE_INLINE int b3OverlapMaskW4( const b3BoxW4* query, const b3BoxW4* boxes )
 {
@@ -105,6 +128,20 @@ B3_FORCE_INLINE int b3OverlapMaskW4( const b3BoxW4* query, const b3BoxW4* boxes 
 	mask = b3AndW4( mask, b3AndW4( b3LessEqW4( query->lowerY, boxes->upperY ), b3GreaterEqW4( query->upperY, boxes->lowerY ) ) );
 	mask = b3AndW4( mask, b3AndW4( b3LessEqW4( query->lowerZ, boxes->upperZ ), b3GreaterEqW4( query->upperZ, boxes->lowerZ ) ) );
 	return b3MoveMaskW4( mask );
+}
+
+// Overlap mask of every lane of A against the four lanes of B. Each lane of A is splatted from
+// the loaded registers. An empty lane of A has an inverted box and gets a zero mask.
+B3_FORCE_INLINE void b3OverlapMasks4x4W4( const b3BoxW4* boxesA, const b3BoxW4* boxesB, int* masks )
+{
+	b3BoxW4 lane0 = B3_LANE_BOX_W4( *boxesA, 0 );
+	b3BoxW4 lane1 = B3_LANE_BOX_W4( *boxesA, 1 );
+	b3BoxW4 lane2 = B3_LANE_BOX_W4( *boxesA, 2 );
+	b3BoxW4 lane3 = B3_LANE_BOX_W4( *boxesA, 3 );
+	masks[0] = b3OverlapMaskW4( &lane0, boxesB );
+	masks[1] = b3OverlapMaskW4( &lane1, boxesB );
+	masks[2] = b3OverlapMaskW4( &lane2, boxesB );
+	masks[3] = b3OverlapMaskW4( &lane3, boxesB );
 }
 
 typedef struct b3TreeView

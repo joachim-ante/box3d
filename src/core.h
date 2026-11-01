@@ -133,8 +133,9 @@ typedef struct b3AtomicI64
 	_Alignas( 8 ) int64_t value;
 } b3AtomicI64;
 
-// Minimum memory alignment used for all allocations
-#define B3_ALIGNMENT 32
+// Minimum memory alignment used for all allocations. A cache line, so a 128 byte tree node
+// or 64 byte body state never straddles a third line.
+#define B3_ALIGNMENT 64
 
 #define B3_RESTRICT restrict
 

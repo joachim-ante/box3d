@@ -183,6 +183,32 @@ static inline int b3MoveMaskW4( b3FloatW4 mask )
 	return (int)( vget_lane_u32( p, 0 ) | vget_lane_u32( p, 1 ) );
 }
 
+// Bit per lane where the given bit of the 32-bit word is set
+static inline int b3BitMaskU32W4( const uint32_t* words, int bit )
+{
+	// Isolate the bit, then shift each lane into its mask position
+	const int32_t shifts[4] = { 0, 1, 2, 3 };
+	uint32x4_t one = vdupq_n_u32( 1 );
+	uint32x4_t bits = vandq_u32( vshlq_u32( vld1q_u32( words ), vdupq_n_s32( -bit ) ), one );
+	bits = vshlq_u32( bits, vld1q_s32( shifts ) );
+	uint32x2_t p = vorr_u32( vget_low_u32( bits ), vget_high_u32( bits ) );
+	return (int)( vget_lane_u32( p, 0 ) | vget_lane_u32( p, 1 ) );
+}
+
+// Left-pack the 32-bit lanes selected by the mask into out, lane order preserved. All four
+// slots of out are written. Returns the number of selected lanes. One table lookup.
+static inline int b3CompressLanesW4( uint32_t* out, const uint32_t* lanes, int mask )
+{
+	static const uint8_t tables[16][16] = B3_COMPRESS_TABLE_W4;
+	uint8x16_t v = vreinterpretq_u8_u32( vld1q_u32( lanes ) );
+	uint8x16_t control = vld1q_u8( tables[mask] );
+	vst1q_u32( out, vreinterpretq_u32_u8( vqtbl1q_u8( v, control ) ) );
+	return b3LaneCountW4( mask );
+}
+
+// Splat a lane into every lane. The lane must be a compile time constant.
+#define b3SplatLaneW4( V, LANE ) vdupq_laneq_f32( ( V ), ( LANE ) )
+
 // component-wise returns mask ? b : a
 static inline b3FloatW4 b3BlendW4( b3FloatW4 a, b3FloatW4 b, b3FloatW4 mask )
 {

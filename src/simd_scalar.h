@@ -226,6 +226,27 @@ static inline int b3MoveMaskW4( b3FloatW4 mask )
 	return ( mask.x != 0.0f ? 1 : 0 ) | ( mask.y != 0.0f ? 2 : 0 ) | ( mask.z != 0.0f ? 4 : 0 ) | ( mask.w != 0.0f ? 8 : 0 );
 }
 
+// Bit per lane where the given bit of the 32-bit word is set
+static inline int b3BitMaskU32W4( const uint32_t* words, int bit )
+{
+	return (int)( ( ( words[0] >> bit ) & 1 ) | ( ( ( words[1] >> bit ) & 1 ) << 1 ) | ( ( ( words[2] >> bit ) & 1 ) << 2 ) |
+				  ( ( ( words[3] >> bit ) & 1 ) << 3 ) );
+}
+
+// Left-pack the 32-bit lanes selected by the mask into out, lane order preserved. All four
+// slots of out are written. Returns the number of selected lanes.
+static inline int b3CompressLanesW4( uint32_t* out, const uint32_t* lanes, int mask )
+{
+	return b3CompressLanesScalarW4( out, lanes, mask );
+}
+
+// Splat a lane into every lane
+static inline b3FloatW4 b3SplatLaneW4( b3FloatW4 v, int lane )
+{
+	float lanes[4] = { v.x, v.y, v.z, v.w };
+	return b3SplatW4( lanes[lane] );
+}
+
 // component-wise returns mask ? b : a
 static inline b3FloatW4 b3BlendW4( b3FloatW4 a, b3FloatW4 b, b3FloatW4 mask )
 {

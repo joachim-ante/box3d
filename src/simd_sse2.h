@@ -9,6 +9,11 @@
 
 #include <emmintrin.h>
 
+#if defined( __SSSE3__ ) || defined( __AVX__ ) || defined( __AVX2__ )
+// pshufb for the lane compress
+#include <tmmintrin.h>
+#endif
+
 // wide float holds 4 numbers
 typedef __m128 b3FloatW4;
 
@@ -179,6 +184,34 @@ static inline int b3MoveMaskW4( b3FloatW4 mask )
 {
 	return _mm_movemask_ps( mask );
 }
+
+// Bit per lane where the given bit of the 32-bit word is set. The bit is shifted into the
+// sign and the sign bits are gathered.
+static inline int b3BitMaskU32W4( const uint32_t* words, int bit )
+{
+	__m128i v = _mm_loadu_si128( (const __m128i*)words );
+	v = _mm_sll_epi32( v, _mm_cvtsi32_si128( 31 - bit ) );
+	return _mm_movemask_ps( _mm_castsi128_ps( v ) );
+}
+
+// Left-pack the 32-bit lanes selected by the mask into out, lane order preserved. All four
+// slots of out are written. Returns the number of selected lanes.
+static inline int b3CompressLanesW4( uint32_t* out, const uint32_t* lanes, int mask )
+{
+#if defined( __SSSE3__ ) || defined( __AVX__ ) || defined( __AVX2__ )
+	static const uint8_t shuffles[16][16] = B3_COMPRESS_TABLE_W4;
+	__m128i v = _mm_loadu_si128( (const __m128i*)lanes );
+	__m128i control = _mm_loadu_si128( (const __m128i*)shuffles[mask] );
+	_mm_storeu_si128( (__m128i*)out, _mm_shuffle_epi8( v, control ) );
+	return b3LaneCountW4( mask );
+#else
+	// SSE2 has no variable shuffle, the store and advance sequence is the best it can do
+	return b3CompressLanesScalarW4( out, lanes, mask );
+#endif
+}
+
+// Splat a lane into every lane. The lane must be a compile time constant.
+#define b3SplatLaneW4( V, LANE ) _mm_shuffle_ps( ( V ), ( V ), _MM_SHUFFLE( LANE, LANE, LANE, LANE ) )
 
 // component-wise returns mask ? b : a
 static inline b3FloatW4 b3BlendW4( b3FloatW4 a, b3FloatW4 b, b3FloatW4 mask )

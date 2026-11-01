@@ -8,6 +8,54 @@
 #include "box3d/types.h"
 
 #include <stdbool.h>
+#include <stdint.h>
+
+// Number of set bits in a four lane mask. A nibble table, so no popcount instruction is needed.
+static inline int b3LaneCountW4( int mask )
+{
+	return (int)( ( 0x4332322132212110ull >> ( 4 * mask ) ) & 0xF );
+}
+
+// Byte shuffle control for left-packing four 32-bit lanes selected by a mask, lane order
+// preserved. A control byte with the high bit set zeroes the output byte on both SSSE3
+// pshufb and Neon tbl, so the unused tail is zero.
+#define B3_LANE_BYTES( L ) 4 * ( L ) + 0, 4 * ( L ) + 1, 4 * ( L ) + 2, 4 * ( L ) + 3
+#define B3_ZERO_BYTES 0x80, 0x80, 0x80, 0x80
+#define B3_COMPRESS_TABLE_W4                                                                                                     \
+	{                                                                                                                            \
+		{ B3_ZERO_BYTES, B3_ZERO_BYTES, B3_ZERO_BYTES, B3_ZERO_BYTES },                                                          \
+		{ B3_LANE_BYTES( 0 ), B3_ZERO_BYTES, B3_ZERO_BYTES, B3_ZERO_BYTES },                                                     \
+		{ B3_LANE_BYTES( 1 ), B3_ZERO_BYTES, B3_ZERO_BYTES, B3_ZERO_BYTES },                                                     \
+		{ B3_LANE_BYTES( 0 ), B3_LANE_BYTES( 1 ), B3_ZERO_BYTES, B3_ZERO_BYTES },                                                \
+		{ B3_LANE_BYTES( 2 ), B3_ZERO_BYTES, B3_ZERO_BYTES, B3_ZERO_BYTES },                                                     \
+		{ B3_LANE_BYTES( 0 ), B3_LANE_BYTES( 2 ), B3_ZERO_BYTES, B3_ZERO_BYTES },                                                \
+		{ B3_LANE_BYTES( 1 ), B3_LANE_BYTES( 2 ), B3_ZERO_BYTES, B3_ZERO_BYTES },                                                \
+		{ B3_LANE_BYTES( 0 ), B3_LANE_BYTES( 1 ), B3_LANE_BYTES( 2 ), B3_ZERO_BYTES },                                           \
+		{ B3_LANE_BYTES( 3 ), B3_ZERO_BYTES, B3_ZERO_BYTES, B3_ZERO_BYTES },                                                     \
+		{ B3_LANE_BYTES( 0 ), B3_LANE_BYTES( 3 ), B3_ZERO_BYTES, B3_ZERO_BYTES },                                                \
+		{ B3_LANE_BYTES( 1 ), B3_LANE_BYTES( 3 ), B3_ZERO_BYTES, B3_ZERO_BYTES },                                                \
+		{ B3_LANE_BYTES( 0 ), B3_LANE_BYTES( 1 ), B3_LANE_BYTES( 3 ), B3_ZERO_BYTES },                                           \
+		{ B3_LANE_BYTES( 2 ), B3_LANE_BYTES( 3 ), B3_ZERO_BYTES, B3_ZERO_BYTES },                                                \
+		{ B3_LANE_BYTES( 0 ), B3_LANE_BYTES( 2 ), B3_LANE_BYTES( 3 ), B3_ZERO_BYTES },                                           \
+		{ B3_LANE_BYTES( 1 ), B3_LANE_BYTES( 2 ), B3_LANE_BYTES( 3 ), B3_ZERO_BYTES },                                           \
+		{ B3_LANE_BYTES( 0 ), B3_LANE_BYTES( 1 ), B3_LANE_BYTES( 2 ), B3_LANE_BYTES( 3 ) },                                      \
+	}
+
+// Portable left-pack: every slot of out is written, the count advances only for selected
+// lanes. Branch free. The SIMD backends override this when a byte shuffle is available.
+static inline int b3CompressLanesScalarW4( uint32_t* out, const uint32_t* lanes, int mask )
+{
+	int count = 0;
+	out[count] = lanes[0];
+	count += mask & 1;
+	out[count] = lanes[1];
+	count += ( mask >> 1 ) & 1;
+	out[count] = lanes[2];
+	count += ( mask >> 2 ) & 1;
+	out[count] = lanes[3];
+	count += ( mask >> 3 ) & 1;
+	return count;
+}
 
 #if defined( B3_SIMD_ENABLED )
 

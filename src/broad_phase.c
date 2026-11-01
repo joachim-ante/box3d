@@ -100,30 +100,33 @@ static int b3GatherMovedNodes( const b3DynamicTree* tree, int* nodeIndices )
 	return count;
 }
 
-#define B3_CANDIDATE_BATCH 32
-
-typedef struct b3CandidatePair
+typedef struct b3IndexPair
 {
-	int shapeIdA;
-	int shapeIdB;
-} b3CandidatePair;
+	int a, b;
+} b3IndexPair;
+
+// Candidate pairs are written branch free, four slots at a time, so the buffer keeps a margin
+// and the flush check runs once per node visit instead of once per pair. A node pair visit
+// emits at most sixteen pairs and a self node at most six. The flush works through the buffer
+// in batches so the hash set prefetch window stays small.
+#define B3_CANDIDATE_CAPACITY 256
+#define B3_CANDIDATE_MARGIN 16
+#define B3_CANDIDATE_BATCH 32
 
 typedef struct b3PairContext
 {
 	b3World* world;
 	b3Array( uint64_t ) * pairKeys;
-	b3CandidatePair batch[B3_CANDIDATE_BATCH];
-	int batchCount;
+
+	// Candidate shape pairs in no particular order. The pair key orders them.
+	uint32_t shapeA[B3_CANDIDATE_CAPACITY];
+	uint32_t shapeB[B3_CANDIDATE_CAPACITY];
+	int count;
 
 	// Compound shapes are static only, so only the static cross pass can meet one. Elsewhere
 	// this stays false and the batch never reads a shape type.
 	bool checkCompounds;
 } b3PairContext;
-
-typedef struct b3IndexPair
-{
-	int a, b;
-} b3IndexPair;
 
 static inline void b3PrefetchHash( b3HashSet* set, uint32_t hash )
 {
@@ -246,15 +249,15 @@ static void b3EmitCompoundPairs( b3PairContext* context, int compoundShapeId, in
 	}
 }
 
-static void b3FlushCandidatePairs( b3PairContext* context )
+// Run a batch of candidates through the pair set and the gauntlet
+static void b3FlushCandidateBatch( b3PairContext* context, const uint32_t* shapeA, const uint32_t* shapeB, int count1 )
 {
 	b3World* world = context->world;
 	b3BroadPhase* bp = &world->broadPhase;
 
-	int count1 = context->batchCount;
-	context->batchCount = 0;
-
-	b3CandidatePair plain[B3_CANDIDATE_BATCH];
+	// Plain pairs get their key up front so the hash set can be prefetched
+	uint64_t keys[B3_CANDIDATE_BATCH];
+	uint32_t hashes[B3_CANDIDATE_BATCH];
 	int plainCount = 0;
 
 	if ( context->checkCompounds )
@@ -264,52 +267,50 @@ static void b3FlushCandidatePairs( b3PairContext* context )
 		const b3Shape* shapes = world->shapes.data;
 		for ( int i = 0; i < count1; ++i )
 		{
-			b3CandidatePair candidate = context->batch[i];
-			bool compoundA = shapes[candidate.shapeIdA].type == b3_compoundShape;
-			bool compoundB = shapes[candidate.shapeIdB].type == b3_compoundShape;
+			int idA = (int)shapeA[i];
+			int idB = (int)shapeB[i];
+			bool compoundA = shapes[idA].type == b3_compoundShape;
+			bool compoundB = shapes[idB].type == b3_compoundShape;
 
 			if ( compoundA )
 			{
 				// Compound versus compound is not supported
 				B3_ASSERT( compoundB == false );
-				b3EmitCompoundPairs( context, candidate.shapeIdA, candidate.shapeIdB );
+				b3EmitCompoundPairs( context, idA, idB );
 			}
 			else if ( compoundB )
 			{
-				b3EmitCompoundPairs( context, candidate.shapeIdB, candidate.shapeIdA );
+				b3EmitCompoundPairs( context, idB, idA );
 			}
 			else
 			{
-				plain[plainCount] = candidate;
+				keys[plainCount] = b3ShapePairKey( idA, idB, 0 );
+				hashes[plainCount] = b3KeyHash( keys[plainCount] );
+				b3PrefetchHash( &bp->pairSet, hashes[plainCount] );
 				plainCount += 1;
 			}
 		}
 	}
 	else
 	{
-		memcpy( plain, context->batch, count1 * sizeof( b3CandidatePair ) );
+		// Prefetch hash set entries. Less than 1% gain in Box2D but the 3D shape is fatter.
+		for ( int i = 0; i < count1; ++i )
+		{
+			keys[i] = b3ShapePairKey( (int)shapeA[i], (int)shapeB[i], 0 );
+			hashes[i] = b3KeyHash( keys[i] );
+			b3PrefetchHash( &bp->pairSet, hashes[i] );
+		}
 		plainCount = count1;
 	}
 
-	// Prefetch hash set entries. Less than 1% gain in Box2D but the 3D shape is fatter.
-	uint64_t keys[B3_CANDIDATE_BATCH];
-	uint32_t hashes[B3_CANDIDATE_BATCH];
-	for ( int i = 0; i < plainCount; ++i )
-	{
-		keys[i] = b3ShapePairKey( plain[i].shapeIdA, plain[i].shapeIdB, 0 );
-		hashes[i] = b3KeyHash( keys[i] );
-		b3PrefetchHash( &bp->pairSet, hashes[i] );
-	}
-
-	// Cull existing pairs.
-	b3CandidatePair candidates[B3_CANDIDATE_BATCH];
+	// Cull existing pairs. The key holds the ordered shape ids.
+	uint64_t candidates[B3_CANDIDATE_BATCH];
 	int count2 = 0;
 	for ( int i = 0; i < plainCount; ++i )
 	{
 		if ( b3ContainsHashedKey( &bp->pairSet, keys[i], hashes[i] ) == false )
 		{
-			candidates[count2] = plain[i];
-			keys[count2] = keys[i];
+			candidates[count2] = keys[i];
 			count2 += 1;
 		}
 	}
@@ -318,79 +319,96 @@ static void b3FlushCandidatePairs( b3PairContext* context )
 	const b3Shape* shapes = world->shapes.data;
 	for ( int i = 0; i < count2; ++i )
 	{
-		b3Prefetch( shapes + candidates[i].shapeIdA );
-		b3Prefetch( shapes + candidates[i].shapeIdB );
+		b3Prefetch( shapes + (int)( ( candidates[i] >> ( 64 - B3_SHAPE_POWER ) ) & B3_SHAPE_MASK ) );
+		b3Prefetch( shapes + (int)( ( candidates[i] >> ( 64 - 2 * B3_SHAPE_POWER ) ) & B3_SHAPE_MASK ) );
 	}
 
 	// Filter candidates.
 	for ( int i = 0; i < count2; ++i )
 	{
-		if ( b3ShouldCreatePair( world, candidates[i].shapeIdA, candidates[i].shapeIdB ) )
+		int idA = (int)( ( candidates[i] >> ( 64 - B3_SHAPE_POWER ) ) & B3_SHAPE_MASK );
+		int idB = (int)( ( candidates[i] >> ( 64 - 2 * B3_SHAPE_POWER ) ) & B3_SHAPE_MASK );
+		if ( b3ShouldCreatePair( world, idA, idB ) )
 		{
 			// The pair passed the gauntlet. A new contact will be created.
-			b3Array_Push( *context->pairKeys, keys[i] );
+			b3Array_Push( *context->pairKeys, candidates[i] );
 		}
 	}
 }
 
-B3_FORCE_INLINE void b3AddCandidatePair( int shapeIdA, int shapeIdB, b3PairContext* context )
+static void b3FlushCandidatePairs( b3PairContext* context )
 {
-	// Follow shape index order.
-	b3CandidatePair* candidate = context->batch + context->batchCount;
-	candidate->shapeIdA = b3MinInt( shapeIdA, shapeIdB );
-	candidate->shapeIdB = b3MaxInt( shapeIdA, shapeIdB );
-	context->batchCount += 1;
-	if ( context->batchCount == B3_CANDIDATE_BATCH )
+	int total = context->count;
+	context->count = 0;
+
+	for ( int start = 0; start < total; start += B3_CANDIDATE_BATCH )
+	{
+		int count = b3MinInt( B3_CANDIDATE_BATCH, total - start );
+		b3FlushCandidateBatch( context, context->shapeA + start, context->shapeB + start, count );
+	}
+}
+
+// Called once before a node visit so the visit can write into the margin without checking
+B3_FORCE_INLINE void b3FlushIfNeeded( b3PairContext* context )
+{
+	if ( context->count >= B3_CANDIDATE_CAPACITY - B3_CANDIDATE_MARGIN )
 	{
 		b3FlushCandidatePairs( context );
 	}
 }
 
+// Pair one shape with the leaf lanes in the mask. Four slots are always written, the count
+// advances by the number of lanes. Branch free.
+B3_FORCE_INLINE void b3AddCandidateLanes( b3PairContext* context, uint32_t shapeId, const uint32_t* userData, int mask )
+{
+	int count = context->count;
+	uint32_t* a = context->shapeA + count;
+	a[0] = shapeId;
+	a[1] = shapeId;
+	a[2] = shapeId;
+	a[3] = shapeId;
+	context->count = count + b3CompressLanesW4( context->shapeB + count, userData, mask );
+}
+
+// All ones when the lane is moved, so the mask keeps every hit. Otherwise only moved lanes of
+// the other side are kept.
+B3_FORCE_INLINE int b3MovedFilter( int movedMaskA, int lane, int movedMaskB )
+{
+	return movedMaskB | -( ( movedMaskA >> lane ) & 1 );
+}
+
 // A lane box against a subtree in the other array. The lane is a leaf, so every hit is a pair.
 // Only pairs with a moved side are reported.
-static void b3CollideLaneAndSubtree( const b3BoxW4* laneBox, bool laneMoved, int shapeId, const b3WideNode* nodes, int rootIndex,
-									 b3PairContext* context )
+static void b3CollideLaneAndSubtree( const b3BoxW4* laneBox, bool laneMoved, uint32_t shapeId, const b3WideNode* nodes,
+									 int rootIndex, b3PairContext* context )
 {
-	int stack[B3_TREE_STACK_SIZE];
+	uint32_t stack[B3_TREE_STACK_SIZE];
 	int stackCount = 0;
-	stack[stackCount++] = rootIndex;
+	stack[stackCount++] = (uint32_t)rootIndex;
+
+	int laneFilter = laneMoved ? 0xF : 0;
 
 	while ( stackCount > 0 )
 	{
-		const b3WideNode* node = nodes + stack[--stackCount];
+		const b3WideNode* node = nodes + b3PopNodeIndex( stack[--stackCount] );
 
 		b3BoxW4 boxes = b3LoadBoxW4( node );
-		int mask = b3OverlapMaskW4( laneBox, &boxes );
-		if ( laneMoved == false )
-		{
-			mask &= b3GetMovedMask( node );
-		}
+		int mask = b3OverlapMaskW4( laneBox, &boxes ) & ( b3GetMovedMask( node ) | laneFilter );
 
 		if ( b3IsLeaf( node ) )
 		{
-			while ( mask != 0 )
-			{
-				int lane = (int)b3CTZ32( (uint32_t)mask );
-				mask &= mask - 1;
-				b3AddCandidatePair( shapeId, (int)node->userData[lane], context );
-			}
+			b3FlushIfNeeded( context );
+			b3AddCandidateLanes( context, shapeId, node->userData, mask );
 		}
 		else
 		{
-			while ( mask != 0 )
+			if ( stackCount > B3_TREE_STACK_SIZE - 4 )
 			{
-				int lane = (int)b3CTZ32( (uint32_t)mask );
-				mask &= mask - 1;
-
-				if ( stackCount < B3_TREE_STACK_SIZE )
-				{
-					stack[stackCount++] = b3GetLaneIndex( node->child[lane] );
-				}
-				else
-				{
-					B3_ASSERT( stackCount < B3_TREE_STACK_SIZE );
-				}
+				B3_ASSERT( stackCount <= B3_TREE_STACK_SIZE - 4 );
+				continue;
 			}
+
+			stackCount = b3PushLanesW4( stack, stackCount, node, mask );
 		}
 	}
 }
@@ -409,18 +427,23 @@ static void b3CollideLaneAndSubtree( const b3BoxW4* laneBox, bool laneMoved, int
 // Many other physics engines do this (Bepu, Rapier, etc). So nothing new here.
 // Each lane of A is tested against the four lanes of B at once. When only one side is a leaf
 // it is made A and each of its lanes descends the subtrees of B on a local stack.
+// The pair stack is two parallel arrays so a lane of A can be pushed against the packed hits
+// of B without a loop.
 static void b3CollideCrossPairs( const b3WideNode* arrayA, const b3WideNode* arrayB, int rootA, int rootB,
 								 b3PairContext* context )
 {
-	b3IndexPair stack[B3_TREE_STACK_SIZE];
+	uint32_t stackA[B3_TREE_STACK_SIZE];
+	uint32_t stackB[B3_TREE_STACK_SIZE];
 	int stackCount = 0;
-	stack[stackCount++] = B3_LITERAL( b3IndexPair ){ .a = rootA, .b = rootB };
+	stackA[stackCount] = (uint32_t)rootA;
+	stackB[stackCount] = (uint32_t)rootB;
+	stackCount += 1;
 
 	while ( stackCount > 0 )
 	{
-		b3IndexPair pair = stack[--stackCount];
-		const b3WideNode* nodeA = arrayA + pair.a;
-		const b3WideNode* nodeB = arrayB + pair.b;
+		stackCount -= 1;
+		const b3WideNode* nodeA = arrayA + b3PopNodeIndex( stackA[stackCount] );
+		const b3WideNode* nodeB = arrayB + b3PopNodeIndex( stackB[stackCount] );
 		const b3WideNode* arrayOfB = arrayB;
 
 		bool leafA = b3IsLeaf( nodeA );
@@ -436,62 +459,65 @@ static void b3CollideCrossPairs( const b3WideNode* arrayA, const b3WideNode* arr
 			leafB = false;
 		}
 
+		b3BoxW4 boxesA = b3LoadBoxW4( nodeA );
 		b3BoxW4 boxesB = b3LoadBoxW4( nodeB );
+		int movedA = b3GetMovedMask( nodeA );
 		int movedB = b3GetMovedMask( nodeB );
 
-		for ( int i = 0; i < 4; ++i )
+		// Empty lanes of A give an empty mask, no lane test needed
+		int masks[4];
+		b3OverlapMasks4x4W4( &boxesA, &boxesB, masks );
+		masks[0] &= b3MovedFilter( movedA, 0, movedB );
+		masks[1] &= b3MovedFilter( movedA, 1, movedB );
+		masks[2] &= b3MovedFilter( movedA, 2, movedB );
+		masks[3] &= b3MovedFilter( movedA, 3, movedB );
+
+		if ( leafA && leafB )
 		{
-			uint32_t childA = nodeA->child[i];
-			if ( b3IsLaneEmpty( childA ) )
+			b3FlushIfNeeded( context );
+			b3AddCandidateLanes( context, nodeA->userData[0], nodeB->userData, masks[0] );
+			b3AddCandidateLanes( context, nodeA->userData[1], nodeB->userData, masks[1] );
+			b3AddCandidateLanes( context, nodeA->userData[2], nodeB->userData, masks[2] );
+			b3AddCandidateLanes( context, nodeA->userData[3], nodeB->userData, masks[3] );
+		}
+		else if ( leafA == false )
+		{
+			// Up to sixteen pushes, each lane of A against the packed hits of B
+			if ( stackCount > B3_TREE_STACK_SIZE - 16 )
 			{
+				B3_ASSERT( stackCount <= B3_TREE_STACK_SIZE - 16 );
 				continue;
 			}
 
-			b3BoxW4 laneBox = b3LaneBoxW4( nodeA, i );
-			int mask = b3OverlapMaskW4( &laneBox, &boxesB );
-			bool movedA = ( childA & B3_MOVED_NODE ) != 0;
-			if ( movedA == false )
+			for ( int i = 0; i < 4; ++i )
 			{
-				mask &= movedB;
+				uint32_t childA = nodeA->child[i];
+				uint32_t* a = stackA + stackCount;
+				a[0] = childA;
+				a[1] = childA;
+				a[2] = childA;
+				a[3] = childA;
+				stackCount += b3CompressLanesW4( stackB + stackCount, nodeB->child, masks[i] );
 			}
-
-			if ( leafA && leafB )
+		}
+		else
+		{
+			for ( int i = 0; i < 4; ++i )
 			{
-				while ( mask != 0 )
+				uint32_t children[4];
+				int hitCount = b3CompressLanesW4( children, nodeB->child, masks[i] );
+				if ( hitCount == 0 )
 				{
-					int j = (int)b3CTZ32( (uint32_t)mask );
-					mask &= mask - 1;
-					b3AddCandidatePair( (int)nodeA->userData[i], (int)nodeB->userData[j], context );
+					continue;
 				}
-			}
-			else if ( leafA == false )
-			{
-				while ( mask != 0 )
-				{
-					int j = (int)b3CTZ32( (uint32_t)mask );
-					mask &= mask - 1;
 
-					if ( stackCount < B3_TREE_STACK_SIZE )
-					{
-						stack[stackCount++] = B3_LITERAL( b3IndexPair ){
-							.a = b3GetLaneIndex( childA ),
-							.b = b3GetLaneIndex( nodeB->child[j] ),
-						};
-					}
-					else
-					{
-						B3_ASSERT( stackCount < B3_TREE_STACK_SIZE );
-					}
-				}
-			}
-			else
-			{
-				while ( mask != 0 )
+				// The lane box is needed in memory for the descent anyway
+				b3BoxW4 laneBox = b3LaneBoxW4( nodeA, i );
+				bool laneMoved = ( ( movedA >> i ) & 1 ) != 0;
+				for ( int k = 0; k < hitCount; ++k )
 				{
-					int j = (int)b3CTZ32( (uint32_t)mask );
-					mask &= mask - 1;
-					int childB = b3GetLaneIndex( nodeB->child[j] );
-					b3CollideLaneAndSubtree( &laneBox, movedA, (int)nodeA->userData[i], arrayOfB, childB, context );
+					b3CollideLaneAndSubtree( &laneBox, laneMoved, nodeA->userData[i], arrayOfB, b3PopNodeIndex( children[k] ),
+											 context );
 				}
 			}
 		}
@@ -508,35 +534,31 @@ static void b3CollideSelfNode( const b3WideNode* nodes, int nodeIndex, b3PairCon
 	b3BoxW4 boxes = b3LoadBoxW4( node );
 	int moved = b3GetMovedMask( node );
 
+	// Lanes above i only, so each pair is tested once. Lane three has nothing above it.
+	b3BoxW4 lane0 = B3_LANE_BOX_W4( boxes, 0 );
+	b3BoxW4 lane1 = B3_LANE_BOX_W4( boxes, 1 );
+	b3BoxW4 lane2 = B3_LANE_BOX_W4( boxes, 2 );
+	int masks[3];
+	masks[0] = b3OverlapMaskW4( &lane0, &boxes ) & b3MovedFilter( moved, 0, moved ) & 0xE;
+	masks[1] = b3OverlapMaskW4( &lane1, &boxes ) & b3MovedFilter( moved, 1, moved ) & 0xC;
+	masks[2] = b3OverlapMaskW4( &lane2, &boxes ) & b3MovedFilter( moved, 2, moved ) & 0x8;
+
+	if ( leaf )
+	{
+		b3FlushIfNeeded( context );
+		b3AddCandidateLanes( context, node->userData[0], node->userData, masks[0] );
+		b3AddCandidateLanes( context, node->userData[1], node->userData, masks[1] );
+		b3AddCandidateLanes( context, node->userData[2], node->userData, masks[2] );
+		return;
+	}
+
 	for ( int i = 0; i < 3; ++i )
 	{
-		uint32_t childI = node->child[i];
-		if ( b3IsLaneEmpty( childI ) )
+		uint32_t children[4];
+		int hitCount = b3CompressLanesW4( children, node->child, masks[i] );
+		for ( int k = 0; k < hitCount; ++k )
 		{
-			continue;
-		}
-
-		// Lanes above i only, so each pair is tested once
-		b3BoxW4 laneBox = b3LaneBoxW4( node, i );
-		int mask = b3OverlapMaskW4( &laneBox, &boxes ) & ~( ( 1 << ( i + 1 ) ) - 1 );
-		if ( ( childI & B3_MOVED_NODE ) == 0 )
-		{
-			mask &= moved;
-		}
-
-		while ( mask != 0 )
-		{
-			int j = (int)b3CTZ32( (uint32_t)mask );
-			mask &= mask - 1;
-
-			if ( leaf )
-			{
-				b3AddCandidatePair( (int)node->userData[i], (int)node->userData[j], context );
-			}
-			else
-			{
-				b3CollideCrossPairs( nodes, nodes, b3GetLaneIndex( childI ), b3GetLaneIndex( node->child[j] ), context );
-			}
+			b3CollideCrossPairs( nodes, nodes, b3GetLaneIndex( node->child[i] ), b3PopNodeIndex( children[k] ), context );
 		}
 	}
 }
@@ -609,30 +631,26 @@ static int b3GatherCrossSeeds( const b3DynamicTree* treeA, const b3DynamicTree* 
 			continue;
 		}
 
+		b3BoxW4 boxesA = b3LoadBoxW4( nodeA );
 		b3BoxW4 boxesB = b3LoadBoxW4( nodeB );
+		int movedA = b3GetMovedMask( nodeA );
 		int movedB = b3GetMovedMask( nodeB );
+
+		// Empty lanes of A give an empty mask
+		int masks[4];
+		b3OverlapMasks4x4W4( &boxesA, &boxesB, masks );
 
 		for ( int i = 0; i < 4; ++i )
 		{
-			uint32_t childA = nodeA->child[i];
-			if ( b3IsLaneEmpty( childA ) )
-			{
-				continue;
-			}
-
-			b3BoxW4 laneBox = b3LaneBoxW4( nodeA, i );
-			int hitMask = b3OverlapMaskW4( &laneBox, &boxesB );
-			if ( ( childA & B3_MOVED_NODE ) == 0 )
-			{
-				hitMask &= movedB;
-			}
+			int hitMask = masks[i] & b3MovedFilter( movedA, i, movedB );
+			int childA = b3GetLaneIndex( nodeA->child[i] );
 
 			while ( hitMask != 0 )
 			{
 				int j = (int)b3CTZ32( (uint32_t)hitMask );
 				hitMask &= hitMask - 1;
 				queue[tail & mask] = B3_LITERAL( b3IndexPair ){
-					.a = b3GetLaneIndex( childA ),
+					.a = childA,
 					.b = b3GetLaneIndex( nodeB->child[j] ),
 				};
 				tail += 1;

@@ -1100,7 +1100,7 @@ B3_FORCE_INLINE b3TreeStats b3QueryTreeView( const b3TreeView* view, b3AABB aabb
 
 	const b3WideNode* nodes = view->nodes;
 
-	int stack[B3_TREE_STACK_SIZE];
+	uint32_t stack[B3_TREE_STACK_SIZE];
 	int stackCount = 0;
 	stack[stackCount++] = B3_ROOT_NODE;
 
@@ -1108,7 +1108,7 @@ B3_FORCE_INLINE b3TreeStats b3QueryTreeView( const b3TreeView* view, b3AABB aabb
 
 	while ( stackCount > 0 )
 	{
-		const b3WideNode* node = nodes + stack[--stackCount];
+		const b3WideNode* node = nodes + b3PopNodeIndex( stack[--stackCount] );
 		result.nodeVisits += 1;
 
 		b3BoxW4 boxes = b3LoadBoxW4( node );
@@ -1116,13 +1116,16 @@ B3_FORCE_INLINE b3TreeStats b3QueryTreeView( const b3TreeView* view, b3AABB aabb
 
 		if ( b3IsLeaf( node ) )
 		{
-			while ( mask != 0 )
-			{
-				int lane = (int)b3CTZ32( (uint32_t)mask );
-				mask &= mask - 1;
+			// Left-pack the hit lanes so the callback loop is a plain counted loop
+			uint32_t children[4];
+			uint32_t userDatas[4];
+			int hitCount = b3CompressLanesW4( children, node->child, mask );
+			b3CompressLanesW4( userDatas, node->userData, mask );
 
-				int proxyId = b3GetLaneIndex( node->child[lane] );
-				uint64_t userData = node->userData[lane];
+			for ( int i = 0; i < hitCount; ++i )
+			{
+				int proxyId = b3GetLaneIndex( children[i] );
+				uint64_t userData = userDatas[i];
 				if ( hasProxies )
 				{
 					const b3TreeProxy* proxy = view->proxies + proxyId;
@@ -1144,20 +1147,13 @@ B3_FORCE_INLINE b3TreeStats b3QueryTreeView( const b3TreeView* view, b3AABB aabb
 		}
 		else
 		{
-			while ( mask != 0 )
+			if ( stackCount > B3_TREE_STACK_SIZE - 4 )
 			{
-				int lane = (int)b3CTZ32( (uint32_t)mask );
-				mask &= mask - 1;
-
-				if ( stackCount < B3_TREE_STACK_SIZE )
-				{
-					stack[stackCount++] = b3GetLaneIndex( node->child[lane] );
-				}
-				else
-				{
-					B3_ASSERT( stackCount < B3_TREE_STACK_SIZE );
-				}
+				B3_ASSERT( stackCount <= B3_TREE_STACK_SIZE - 4 );
+				continue;
 			}
+
+			stackCount = b3PushLanesW4( stack, stackCount, node, mask );
 		}
 	}
 
@@ -1406,17 +1402,20 @@ B3_FORCE_INLINE b3TreeStats b3BoxCastTreeView( const b3TreeView* view, const b3B
 {
 	b3TreeStats result = { 0 };
 
-	// The caller folds the shape radius and the world origin into the box
+	// The caller folds the shape radius and the world origin into the box. The ray starts at
+	// the lower corner of the box, so only the lane lower bounds need to grow, by the full box
+	// size. Same hits as casting the center against boxes grown by the half extents on both
+	// sides, three fewer ops per node.
 	b3AABB originAABB = input->box;
 
-	b3Vec3 origin = b3AABB_Center( originAABB );
-	b3Vec3 extension = b3AABB_Extents( originAABB );
+	b3Vec3 origin = originAABB.lowerBound;
+	b3Vec3 size = b3Sub( originAABB.upperBound, originAABB.lowerBound );
 	b3Vec3 invDirection = b3InverseDirection( input->translation );
 	float maxFraction = input->maxFraction;
 
-	b3FloatW4 ex = b3SplatW4( extension.x );
-	b3FloatW4 ey = b3SplatW4( extension.y );
-	b3FloatW4 ez = b3SplatW4( extension.z );
+	b3FloatW4 sx = b3SplatW4( size.x );
+	b3FloatW4 sy = b3SplatW4( size.y );
+	b3FloatW4 sz = b3SplatW4( size.z );
 
 	const b3WideNode* nodes = view->nodes;
 
@@ -1439,12 +1438,9 @@ B3_FORCE_INLINE b3TreeStats b3BoxCastTreeView( const b3TreeView* view, const b3B
 
 		// Empty lanes stay inverted because infinity absorbs the extension
 		b3BoxW4 boxes = b3LoadBoxW4( node );
-		boxes.lowerX = b3SubW4( boxes.lowerX, ex );
-		boxes.lowerY = b3SubW4( boxes.lowerY, ey );
-		boxes.lowerZ = b3SubW4( boxes.lowerZ, ez );
-		boxes.upperX = b3AddW4( boxes.upperX, ex );
-		boxes.upperY = b3AddW4( boxes.upperY, ey );
-		boxes.upperZ = b3AddW4( boxes.upperZ, ez );
+		boxes.lowerX = b3SubW4( boxes.lowerX, sx );
+		boxes.lowerY = b3SubW4( boxes.lowerY, sy );
+		boxes.lowerZ = b3SubW4( boxes.lowerZ, sz );
 
 		b3FloatW4 fractions;
 		int mask = b3RayMaskW4( origin, invDirection, maxFraction, &boxes, &fractions );
@@ -1601,45 +1597,55 @@ b3TreeStats b3TreeView_BoxCast( const b3TreeView* view, const b3BoxCastInput* in
 	return b3BoxCastTreeView( view, input, maskBits, requireAllBits, callback, context, true );
 }
 
-// Median split heuristic. Partitions the indices and centers in place on the longest axis of
-// the center bounds and returns the left count, which is strictly inside the range.
-static int b3PartitionMid( int* indices, b3Vec3* centers, int count )
+// Bounds of a set of leaf centers. Min and max are exact, so the result does not depend on
+// the visiting order and matches bounds accumulated during a partition bit for bit.
+typedef struct b3CenterBounds
 {
-	// Handle trivial case
-	if ( count <= 2 )
-	{
-		return count / 2;
-	}
+	b3Vec3 lower, upper;
+} b3CenterBounds;
 
-	b3Vec3 lowerBound = centers[0];
-	b3Vec3 upperBound = centers[0];
-
+static b3CenterBounds b3ComputeCenterBounds( const b3Vec3* centers, int count )
+{
+	B3_ASSERT( count > 0 );
+	b3CenterBounds bounds = { centers[0], centers[0] };
 	for ( int i = 1; i < count; ++i )
 	{
-		lowerBound = b3Min( lowerBound, centers[i] );
-		upperBound = b3Max( upperBound, centers[i] );
+		bounds.lower = b3Min( bounds.lower, centers[i] );
+		bounds.upper = b3Max( bounds.upper, centers[i] );
+	}
+	return bounds;
+}
+
+// Longest axis of the center bounds
+static inline int b3LongestAxis( b3CenterBounds bounds )
+{
+	b3Vec3 d = b3Sub( bounds.upper, bounds.lower );
+	return ( d.x >= d.y && d.x >= d.z ) ? 0 : ( d.y >= d.z ? 1 : 2 );
+}
+
+// Median split heuristic. Partitions the indices and centers in place on the longest axis of
+// the given center bounds and returns the left count, which is strictly inside the range.
+// The center bounds of both sides are accumulated while partitioning, so a split is one pass
+// over the range rather than a bounds scan followed by the partition.
+static int b3PartitionMid( int* indices, b3Vec3* centers, int count, b3CenterBounds bounds, b3CenterBounds* boundsA,
+						   b3CenterBounds* boundsB )
+{
+	B3_ASSERT( count >= 2 );
+
+	// Handle trivial case
+	if ( count == 2 )
+	{
+		*boundsA = B3_LITERAL( b3CenterBounds ){ centers[0], centers[0] };
+		*boundsB = B3_LITERAL( b3CenterBounds ){ centers[1], centers[1] };
+		return 1;
 	}
 
-	b3Vec3 d = b3Sub( upperBound, lowerBound );
-	b3Vec3 c = b3MulSV( 0.5f, b3Add( lowerBound, upperBound ) );
+	int axis = b3LongestAxis( bounds );
+	b3Vec3 c = b3MulSV( 0.5f, b3Add( bounds.lower, bounds.upper ) );
+	float pivot = axis == 0 ? c.x : ( axis == 1 ? c.y : c.z );
 
-	int axis;
-	float pivot;
-	if ( d.x >= d.y && d.x >= d.z )
-	{
-		axis = 0;
-		pivot = c.x;
-	}
-	else if ( d.y >= d.z )
-	{
-		axis = 1;
-		pivot = c.y;
-	}
-	else
-	{
-		axis = 2;
-		pivot = c.z;
-	}
+	b3Vec3 lowerA = { FLT_MAX, FLT_MAX, FLT_MAX }, upperA = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+	b3Vec3 lowerB = { FLT_MAX, FLT_MAX, FLT_MAX }, upperB = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
 
 	// Partition longest axis using the Hoare partition scheme
 	// https://en.wikipedia.org/wiki/Quicksort
@@ -1650,16 +1656,26 @@ static int b3PartitionMid( int* indices, b3Vec3* centers, int count )
 	{
 		while ( i1 < i2 && keys[3 * i1 + axis] < pivot )
 		{
+			lowerA = b3Min( lowerA, centers[i1] );
+			upperA = b3Max( upperA, centers[i1] );
 			i1 += 1;
 		};
 
 		while ( i1 < i2 && keys[3 * ( i2 - 1 ) + axis] >= pivot )
 		{
+			lowerB = b3Min( lowerB, centers[i2 - 1] );
+			upperB = b3Max( upperB, centers[i2 - 1] );
 			i2 -= 1;
 		};
 
 		if ( i1 < i2 )
 		{
+			// The item at i1 moves to the right side and the item at i2 - 1 to the left side
+			lowerB = b3Min( lowerB, centers[i1] );
+			upperB = b3Max( upperB, centers[i1] );
+			lowerA = b3Min( lowerA, centers[i2 - 1] );
+			upperA = b3Max( upperA, centers[i2 - 1] );
+
 			// Swap indices
 			{
 				int temp = indices[i1];
@@ -1682,25 +1698,22 @@ static int b3PartitionMid( int* indices, b3Vec3* centers, int count )
 
 	if ( i1 > 0 && i1 < count )
 	{
+		*boundsA = B3_LITERAL( b3CenterBounds ){ lowerA, upperA };
+		*boundsB = B3_LITERAL( b3CenterBounds ){ lowerB, upperB };
 		return i1;
 	}
 
-	return count / 2;
+	// Every center fell on one side of the pivot. Split in half and scan the halves, rare.
+	int split = count / 2;
+	*boundsA = b3ComputeCenterBounds( centers, split );
+	*boundsB = b3ComputeCenterBounds( centers + split, count - split );
+	return split;
 }
 
 // Insertion sort of a range along the longest axis of the center bounds. Ranges are small.
-static void b3SortRange( int* indices, b3Vec3* centers, int count )
+static void b3SortRange( int* indices, b3Vec3* centers, int count, b3CenterBounds bounds )
 {
-	b3Vec3 lowerBound = centers[0];
-	b3Vec3 upperBound = centers[0];
-	for ( int i = 1; i < count; ++i )
-	{
-		lowerBound = b3Min( lowerBound, centers[i] );
-		upperBound = b3Max( upperBound, centers[i] );
-	}
-
-	b3Vec3 d = b3Sub( upperBound, lowerBound );
-	int axis = ( d.x >= d.y && d.x >= d.z ) ? 0 : ( d.y >= d.z ? 1 : 2 );
+	int axis = b3LongestAxis( bounds );
 	float* keys = &centers[0].x;
 
 	for ( int i = 1; i < count; ++i )
@@ -1726,6 +1739,9 @@ typedef struct b3BuildRange
 	int start;
 	int count;
 	int nodeIndex;
+
+	// Bounds of the leaf centers in the range. Only read when the range is split or sorted.
+	b3CenterBounds bounds;
 } b3BuildRange;
 
 // Bump allocate a node in the new array. The new array grows on its own, the old array is
@@ -1941,7 +1957,7 @@ static void b3CreateChildren( b3DynamicTree* tree, int nodeIndex, const b3BuildR
 // Build the new array over the build leaves. Nodes are allocated parent first so the sweep
 // refit works on the result. Ranges above the small size are split in four by two levels of
 // median split. Small ranges are sorted along their longest axis and chunked into full nodes.
-static void b3BuildTree( b3DynamicTree* tree, int leafCount )
+static void b3BuildTree( b3DynamicTree* tree, int leafCount, b3CenterBounds leafBounds )
 {
 	int* leafIndices = tree->leafIndices;
 	b3Vec3* leafCenters = tree->leafCenters;
@@ -1955,7 +1971,7 @@ static void b3BuildTree( b3DynamicTree* tree, int leafCount )
 
 	b3BuildRange stack[B3_TREE_STACK_SIZE];
 	int stackCount = 0;
-	stack[stackCount++] = B3_LITERAL( b3BuildRange ){ 0, leafCount, B3_ROOT_NODE };
+	stack[stackCount++] = B3_LITERAL( b3BuildRange ){ 0, leafCount, B3_ROOT_NODE, leafBounds };
 
 	while ( stackCount > 0 )
 	{
@@ -1971,22 +1987,25 @@ static void b3BuildTree( b3DynamicTree* tree, int leafCount )
 
 		if ( range.count <= B3_SMALL_RANGE_SIZE )
 		{
-			b3SortRange( leafIndices + range.start, leafCenters + range.start, range.count );
+			b3SortRange( leafIndices + range.start, leafCenters + range.start, range.count, range.bounds );
 
-			// Three full chunks and whatever remains
+			// Three full chunks and whatever remains. Full chunks become leaf nodes and never read
+			// their bounds. The remainder can be sorted again, so it gets a scan, at most 20 items.
 			int subRangeCount = 0;
 			int start = range.start;
 			int remaining = range.count;
 			while ( remaining > 4 && subRangeCount < 3 )
 			{
-				subRanges[subRangeCount++] = B3_LITERAL( b3BuildRange ){ start, 4, B3_NULL_INDEX };
+				subRanges[subRangeCount++] = B3_LITERAL( b3BuildRange ){ start, 4, B3_NULL_INDEX, range.bounds };
 				start += 4;
 				remaining -= 4;
 			}
 
 			if ( remaining > 0 )
 			{
-				subRanges[subRangeCount++] = B3_LITERAL( b3BuildRange ){ start, remaining, B3_NULL_INDEX };
+				b3CenterBounds remainderBounds =
+					remaining > 4 ? b3ComputeCenterBounds( leafCenters + start, remaining ) : range.bounds;
+				subRanges[subRangeCount++] = B3_LITERAL( b3BuildRange ){ start, remaining, B3_NULL_INDEX, remainderBounds };
 			}
 
 			b3CreateChildren( tree, range.nodeIndex, subRanges, subRangeCount, stack, &stackCount, &builtCount );
@@ -1994,24 +2013,29 @@ static void b3BuildTree( b3DynamicTree* tree, int leafCount )
 		}
 
 		// Two levels of median split. The first keeps two on each side so the second has something
-		// to cut.
+		// to cut. Each split hands its sides their center bounds, so no range is scanned twice.
 		int* indices = leafIndices + range.start;
 		b3Vec3* centers = leafCenters + range.start;
 		int count = range.count;
 
-		int split1 = b3PartitionMid( indices, centers, count );
+		b3CenterBounds bounds1A, bounds1B;
+		int split1 = b3PartitionMid( indices, centers, count, range.bounds, &bounds1A, &bounds1B );
 		if ( split1 < 2 || count - split1 < 2 )
 		{
 			split1 = count / 2;
+			bounds1A = b3ComputeCenterBounds( centers, split1 );
+			bounds1B = b3ComputeCenterBounds( centers + split1, count - split1 );
 		}
 
-		int split0 = b3PartitionMid( indices, centers, split1 );
-		int split2 = split1 + b3PartitionMid( indices + split1, centers + split1, count - split1 );
+		b3CenterBounds bounds[4];
+		int split0 = b3PartitionMid( indices, centers, split1, bounds1A, bounds + 0, bounds + 1 );
+		int split2 =
+			split1 + b3PartitionMid( indices + split1, centers + split1, count - split1, bounds1B, bounds + 2, bounds + 3 );
 
-		subRanges[0] = B3_LITERAL( b3BuildRange ){ range.start, split0, B3_NULL_INDEX };
-		subRanges[1] = B3_LITERAL( b3BuildRange ){ range.start + split0, split1 - split0, B3_NULL_INDEX };
-		subRanges[2] = B3_LITERAL( b3BuildRange ){ range.start + split1, split2 - split1, B3_NULL_INDEX };
-		subRanges[3] = B3_LITERAL( b3BuildRange ){ range.start + split2, count - split2, B3_NULL_INDEX };
+		subRanges[0] = B3_LITERAL( b3BuildRange ){ range.start, split0, B3_NULL_INDEX, bounds[0] };
+		subRanges[1] = B3_LITERAL( b3BuildRange ){ range.start + split0, split1 - split0, B3_NULL_INDEX, bounds[1] };
+		subRanges[2] = B3_LITERAL( b3BuildRange ){ range.start + split1, split2 - split1, B3_NULL_INDEX, bounds[2] };
+		subRanges[3] = B3_LITERAL( b3BuildRange ){ range.start + split2, count - split2, B3_NULL_INDEX, bounds[3] };
 
 		b3CreateChildren( tree, range.nodeIndex, subRanges, 4, stack, &stackCount, &builtCount );
 	}
@@ -2128,13 +2152,16 @@ int b3DynamicTree_Rebuild( b3DynamicTree* tree, bool fullBuild )
 
 	B3_ASSERT( 0 < leafCount && leafCount <= 4 * tree->nodeEnd );
 
+	// The root range bounds seed the build, every split below derives its own from the parent.
+	b3CenterBounds leafBounds = b3ComputeCenterBounds( leafCenters, leafCount );
+
 	int oldCapacity = tree->nodeCapacity;
 	if ( tree->swapNodes == NULL )
 	{
 		tree->swapNodes = b3AllocZero( oldCapacity * sizeof( b3WideNode ) );
 	}
 
-	b3BuildTree( tree, leafCount );
+	b3BuildTree( tree, leafCount, leafBounds );
 
 	// The spare is now the tree and the old array is the spare. The build is dense, so the
 	// stale tail of the old array sits above the end and is never read.
@@ -2233,37 +2260,33 @@ void b3DynamicTree_ClearMoved( b3DynamicTree* tree )
 		return;
 	}
 
-	int stack[B3_TREE_STACK_SIZE];
+	uint32_t stack[B3_TREE_STACK_SIZE];
 	int stackCount = 0;
 	stack[stackCount++] = B3_ROOT_NODE;
 
 	while ( stackCount > 0 )
 	{
-		b3WideNode* node = nodes + stack[--stackCount];
-		bool leaf = b3IsLeaf( node );
-		for ( int lane = 0; lane < 4; ++lane )
+		b3WideNode* node = nodes + b3PopNodeIndex( stack[--stackCount] );
+		int moved = b3GetMovedMask( node );
+
+		node->child[0] &= ~B3_MOVED_NODE;
+		node->child[1] &= ~B3_MOVED_NODE;
+		node->child[2] &= ~B3_MOVED_NODE;
+		node->child[3] &= ~B3_MOVED_NODE;
+
+		if ( b3IsLeaf( node ) )
 		{
-			if ( ( node->child[lane] & B3_MOVED_NODE ) == 0 )
-			{
-				continue;
-			}
-
-			node->child[lane] &= ~B3_MOVED_NODE;
-			if ( leaf )
-			{
-				continue;
-			}
-
-			if ( stackCount < B3_TREE_STACK_SIZE )
-			{
-				stack[stackCount++] = b3GetLaneIndex( node->child[lane] );
-			}
-			else
-			{
-				// Bad stuff will happen if the moved flags don't get cleared.
-				B3_ASSERT( stackCount < B3_TREE_STACK_SIZE );
-			}
+			continue;
 		}
+
+		if ( stackCount > B3_TREE_STACK_SIZE - 4 )
+		{
+			// Bad stuff will happen if the moved flags don't get cleared.
+			B3_ASSERT( stackCount <= B3_TREE_STACK_SIZE - 4 );
+			continue;
+		}
+
+		stackCount = b3PushLanesW4( stack, stackCount, node, moved );
 	}
 }
 
