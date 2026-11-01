@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "platform.h"
 #include "simd.h"
 
 #include "box3d/collision.h"
@@ -106,6 +107,13 @@ B3_FORCE_INLINE b3BoxW4 b3LaneBoxW4( const b3WideNode* node, int lane )
 	boxes.lowerZ = b3SplatW4( node->lowerZ[lane] );
 	boxes.upperZ = b3SplatW4( node->upperZ[lane] );
 	return boxes;
+}
+
+// Pull both cache lines of a node in ahead of its visit
+B3_FORCE_INLINE void b3PrefetchNode( const b3WideNode* node )
+{
+	b3Prefetch( node );
+	b3Prefetch( (const char*)node + 64 );
 }
 
 // Push the lanes in the mask onto a node stack. Four slots are always written, so the caller

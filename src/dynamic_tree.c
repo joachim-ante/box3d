@@ -1166,32 +1166,51 @@ typedef struct b3TreeHit
 	float value;
 } b3TreeHit;
 
-// Gather the lanes in a mask ordered by ascending value. At most four, so an insertion sort.
+// Branch free compare and exchange of two unsigned keys
+#define B3_SORT_KEYS( A, B )                                                                                                     \
+	{                                                                                                                            \
+		uint32_t lo = ( A ) < ( B ) ? ( A ) : ( B );                                                                             \
+		uint32_t hi = ( A ) < ( B ) ? ( B ) : ( A );                                                                             \
+		( A ) = lo;                                                                                                              \
+		( B ) = hi;                                                                                                              \
+	}
+
+// Gather the lanes in a mask ordered by ascending value, branch free. The values must be
+// non-negative so their bit patterns order as unsigned integers. The lane index rides in the
+// two low mantissa bits through a five exchange sorting network and the misses sort last. All
+// four hits are written, the count says how many are real. The values are read back from the
+// unmodified lanes so the hit values are exact.
 B3_FORCE_INLINE int b3SortHits( int mask, b3FloatW4 values, b3TreeHit* hits )
 {
 	float lanes[4];
 	b3StoreW4( lanes, values );
 
-	int count = 0;
-	while ( mask != 0 )
+	float keyed[4];
+	b3StoreW4( keyed, b3EmbedIndexW4( values, 0, 2 ) );
+
+	uint32_t keys[4];
+	memcpy( keys, keyed, sizeof( keys ) );
+
+	// A clear mask bit sets every key bit, so the lane sorts behind every hit
+	keys[0] |= 0u - (uint32_t)( ( mask & 1 ) ^ 1 );
+	keys[1] |= 0u - (uint32_t)( ( ( mask >> 1 ) & 1 ) ^ 1 );
+	keys[2] |= 0u - (uint32_t)( ( ( mask >> 2 ) & 1 ) ^ 1 );
+	keys[3] |= 0u - (uint32_t)( ( ( mask >> 3 ) & 1 ) ^ 1 );
+
+	B3_SORT_KEYS( keys[0], keys[1] );
+	B3_SORT_KEYS( keys[2], keys[3] );
+	B3_SORT_KEYS( keys[0], keys[2] );
+	B3_SORT_KEYS( keys[1], keys[3] );
+	B3_SORT_KEYS( keys[1], keys[2] );
+
+	for ( int i = 0; i < 4; ++i )
 	{
-		int lane = (int)b3CTZ32( (uint32_t)mask );
-		mask &= mask - 1;
-
-		float value = lanes[lane];
-		int j = count;
-		while ( j > 0 && value < hits[j - 1].value )
-		{
-			hits[j] = hits[j - 1];
-			j -= 1;
-		}
-
-		hits[j].lane = lane;
-		hits[j].value = value;
-		count += 1;
+		int lane = (int)( keys[i] & 3 );
+		hits[i].lane = lane;
+		hits[i].value = lanes[lane];
 	}
 
-	return count;
+	return b3LaneCountW4( mask );
 }
 
 typedef struct b3QueryClosestItem
@@ -1383,10 +1402,13 @@ B3_FORCE_INLINE b3TreeStats b3RayCastTreeView( const b3TreeView* view, const b3R
 				continue;
 			}
 
-			// Push the farthest first so the closest pops first
+			// Push the farthest first so the closest pops first. The pushed nodes are prefetched
+			// so the sibling loads overlap the test of the nearest.
 			for ( int i = hitCount - 1; i >= 0; --i )
 			{
-				stack[stackCount++] = B3_LITERAL( b3CastItem ){ b3GetLaneIndex( node->child[hits[i].lane] ), hits[i].value };
+				int childIndex = b3GetLaneIndex( node->child[hits[i].lane] );
+				b3PrefetchNode( nodes + childIndex );
+				stack[stackCount++] = B3_LITERAL( b3CastItem ){ childIndex, hits[i].value };
 			}
 		}
 	}
