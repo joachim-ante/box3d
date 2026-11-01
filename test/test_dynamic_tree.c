@@ -660,7 +660,7 @@ static int TreeSaveLoadRoundtrip( void )
 	ENSURE( loaded.nodeEnd == tree.nodeEnd );
 	ENSURE( loaded.nodeCapacity == tree.nodeEnd );
 	ENSURE( b3DynamicTree_GetProxyCount( &loaded ) == b3DynamicTree_GetProxyCount( &tree ) );
-	ENSURE( memcmp( loaded.nodes, tree.nodes, (size_t)tree.nodeEnd * sizeof( b3TreeNode ) ) == 0 );
+	ENSURE( memcmp( loaded.nodes, tree.nodes, (size_t)tree.nodeEnd * sizeof( b3WideNode ) ) == 0 );
 	ENSURE( memcmp( loaded.parents, tree.parents, (size_t)tree.nodeEnd * sizeof( int32_t ) ) == 0 );
 	b3DynamicTree_Validate( &loaded );
 
@@ -669,8 +669,139 @@ static int TreeSaveLoadRoundtrip( void )
 	return 0;
 }
 
+// Insertion fills lanes and splits full nodes up to the root, removal empties lanes, splices
+// single child nodes out and collapses the root. Churning in a cluster makes the splits deep and
+// churning back down walks every removal path. The query has to agree with the scan throughout.
+static int TreeSplitAndCollapse( void )
+{
+	s_seed = 2024;
+
+	b3DynamicTree tree = b3DynamicTree_Create( 4 );
+
+	b3AABB boxes[PROXY_COUNT];
+	int proxies[PROXY_COUNT];
+	bool alive[PROXY_COUNT];
+
+	int rootSplitCount = 0;
+	for ( int i = 0; i < PROXY_COUNT; ++i )
+	{
+		// A tight cluster so lanes overlap heavily and every insert competes for the same leaves
+		boxes[i] = RandomBox( 2.0f, 1.0f );
+		proxies[i] = b3DynamicTree_CreateProxy( &tree, boxes[i], B3_DEFAULT_CATEGORY_BITS, (uint64_t)i );
+		alive[i] = true;
+		b3DynamicTree_Validate( &tree );
+
+		if ( i == 4 )
+		{
+			// The fifth proxy splits the leaf root into an internal root with two children
+			ENSURE( b3DynamicTree_GetHeight( &tree ) == 1 );
+			rootSplitCount += 1;
+		}
+	}
+
+	ENSURE( rootSplitCount == 1 );
+	ENSURE( b3DynamicTree_GetHeight( &tree ) >= 3 );
+	ENSURE( tree.nodeEnd > PROXY_COUNT / 4 );
+
+	b3AABB queryBox = RandomBox( 2.0f, 1.5f );
+	HitSet treeHits = { 0 };
+	b3DynamicTree_Query( &tree, queryBox, B3_DEFAULT_MASK_BITS, false, CollectCallback, &treeHits );
+	HitSet bruteHits = { 0 };
+	for ( int i = 0; i < PROXY_COUNT; ++i )
+	{
+		if ( b3AABB_Overlaps( boxes[i], queryBox ) )
+		{
+			bruteHits.ids[bruteHits.count++] = i;
+		}
+	}
+	ENSURE( SameSet( &treeHits, &bruteHits ) == 0 );
+	ENSURE( treeHits.count > 10 );
+
+	// Remove in a scrambled order down to one so the root collapses through every level
+	int aliveCount = PROXY_COUNT;
+	for ( int step = 0; aliveCount > 1; ++step )
+	{
+		int i = (int)( NextRandom() % PROXY_COUNT );
+		if ( alive[i] == false )
+		{
+			continue;
+		}
+
+		b3DynamicTree_DestroyProxy( &tree, proxies[i] );
+		alive[i] = false;
+		aliveCount -= 1;
+		b3DynamicTree_Validate( &tree );
+		ENSURE( b3DynamicTree_GetProxyCount( &tree ) == aliveCount );
+	}
+
+	// A single proxy sits in the root leaf again
+	ENSURE( b3DynamicTree_GetHeight( &tree ) == 0 );
+	ENSURE( b3IsLeaf( tree.nodes + B3_ROOT_NODE ) );
+	ENSURE( tree.nodeEnd > 1 );
+
+	treeHits.count = 0;
+	bruteHits.count = 0;
+	b3AABB allBox = { { -10.0f, -10.0f, -10.0f }, { 10.0f, 10.0f, 10.0f } };
+	b3DynamicTree_Query( &tree, allBox, B3_DEFAULT_MASK_BITS, false, CollectCallback, &treeHits );
+	for ( int i = 0; i < PROXY_COUNT; ++i )
+	{
+		if ( alive[i] )
+		{
+			bruteHits.ids[bruteHits.count++] = i;
+		}
+	}
+	ENSURE( SameSet( &treeHits, &bruteHits ) == 0 );
+	ENSURE( treeHits.count == 1 );
+
+	// Refill through the free list, which hands back low indices and unorders the array
+	for ( int i = 0; i < PROXY_COUNT; ++i )
+	{
+		if ( alive[i] )
+		{
+			continue;
+		}
+
+		boxes[i] = RandomBox( 2.0f, 1.0f );
+		proxies[i] = b3DynamicTree_CreateProxy( &tree, boxes[i], B3_DEFAULT_CATEGORY_BITS, (uint64_t)i );
+		alive[i] = true;
+	}
+
+	b3DynamicTree_Validate( &tree );
+	ENSURE( b3DynamicTree_GetProxyCount( &tree ) == PROXY_COUNT );
+
+	// Enlarging everything marks every lane, then the unordered refit and the rebuild both have to cope
+	for ( int i = 0; i < PROXY_COUNT; ++i )
+	{
+		boxes[i] = b3AABB_Inflate( boxes[i], 0.5f );
+		b3DynamicTree_EnlargeProxy( &tree, proxies[i], boxes[i] );
+	}
+
+	b3DynamicTree_Refit( &tree );
+	b3DynamicTree_Validate( &tree );
+	b3DynamicTree_Rebuild( &tree, false );
+	b3DynamicTree_Validate( &tree );
+	b3DynamicTree_ValidateNoMoved( &tree );
+	ENSURE( tree.dfsOrdered );
+
+	treeHits.count = 0;
+	bruteHits.count = 0;
+	b3DynamicTree_Query( &tree, queryBox, B3_DEFAULT_MASK_BITS, false, CollectCallback, &treeHits );
+	for ( int i = 0; i < PROXY_COUNT; ++i )
+	{
+		if ( b3AABB_Overlaps( boxes[i], queryBox ) )
+		{
+			bruteHits.ids[bruteHits.count++] = i;
+		}
+	}
+	ENSURE( SameSet( &treeHits, &bruteHits ) == 0 );
+
+	b3DynamicTree_Destroy( &tree );
+	return 0;
+}
+
 int DynamicTreeTest( void )
 {
+	RUN_SUBTEST( TreeSplitAndCollapse );
 	RUN_SUBTEST( TreeLeafRoot );
 	RUN_SUBTEST( TreeQueryBruteForce );
 	RUN_SUBTEST( TreeCategoryFilter );

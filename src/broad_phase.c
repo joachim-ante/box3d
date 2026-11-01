@@ -9,6 +9,7 @@
 #include "compound.h"
 #include "contact.h"
 #include "core.h"
+#include "ctz.h"
 #include "dynamic_tree.h"
 #include "parallel_for.h"
 #include "physics_world.h"
@@ -35,7 +36,7 @@ void b3CreateBroadPhase( b3BroadPhase* bp, const b3Capacity* capacity )
 	int dynamicCapacity = b3MaxInt( 16, capacity->dynamicShapeCount );
 	bp->trees[b3_dynamicBody] = b3DynamicTree_Create( dynamicCapacity );
 
-	bp->movedSiblings = NULL;
+	bp->movedNodes = NULL;
 }
 
 void b3DestroyBroadPhase( b3BroadPhase* bp )
@@ -80,21 +81,19 @@ void b3BroadPhase_MoveProxy( b3BroadPhase* bp, int proxyKey, b3AABB aabb )
 	b3DynamicTree_MoveProxyInternal( bp->trees + proxyType, proxyId, aabb, mark );
 }
 
-// Gather the sibling pairs with a moved node. This is done serially, it is cache friendly.
-static int b3GatherMovedSiblings( const b3DynamicTree* tree, int* pairIndices )
+// Gather the nodes with a moved lane. This is done serially, it is cache friendly. Free nodes
+// are empty leaf nodes without moved lanes, so they drop out.
+static int b3GatherMovedNodes( const b3DynamicTree* tree, int* nodeIndices )
 {
-	const b3TreeNode* nodes = tree->nodes;
+	const b3WideNode* nodes = tree->nodes;
 	int nodeEnd = tree->nodeEnd;
 
 	int count = 0;
-
-	// Skip the root.
-	for ( int pair = 2; pair < nodeEnd; pair += 2 )
+	for ( int index = 0; index < nodeEnd; ++index )
 	{
-		// Push when either sibling moved.
-		if ( ( nodes[pair].flagIndex | nodes[pair + 1].flagIndex ) & B3_MOVED_NODE )
+		if ( b3HasMovedLane( nodes + index ) )
 		{
-			pairIndices[count++] = pair;
+			nodeIndices[count++] = index;
 		}
 	}
 
@@ -120,12 +119,6 @@ typedef struct b3PairContext
 	// this stays false and the batch never reads a shape type.
 	bool checkCompounds;
 } b3PairContext;
-
-typedef struct b3NodePair
-{
-	b3TreeNode a;
-	b3TreeNode b;
-} b3NodePair;
 
 typedef struct b3IndexPair
 {
@@ -353,52 +346,45 @@ B3_FORCE_INLINE void b3AddCandidatePair( int shapeIdA, int shapeIdB, b3PairConte
 	}
 }
 
-// Did either move and if so do they overlap?
-B3_FORCE_INLINE bool b3TestPair( const b3TreeNode* a, const b3TreeNode* b )
+// A lane box against a subtree in the other array. The lane is a leaf, so every hit is a pair.
+// Only pairs with a moved side are reported.
+static void b3CollideLaneAndSubtree( const b3BoxW4* laneBox, bool laneMoved, int shapeId, const b3WideNode* nodes, int rootIndex,
+									 b3PairContext* context )
 {
-	if ( ( ( a->flagIndex | b->flagIndex ) & B3_MOVED_NODE ) == 0 )
-	{
-		return false;
-	}
-
-	return b3OverlapV( &a->aabb, &b->aabb );
-}
-
-static void b3CollideProxyAndSubtree( const b3TreeNode* proxy, const b3TreeNode* nodes, int pair, b3PairContext* context )
-{
-	uint32_t proxyMark = proxy->flagIndex & B3_MOVED_NODE;
-	b3AABBV boxv = b3LoadAABBV( &proxy->aabb );
-	int shapeId = proxy->shapeIndex;
-
 	int stack[B3_TREE_STACK_SIZE];
 	int stackCount = 0;
-	stack[stackCount++] = pair;
+	stack[stackCount++] = rootIndex;
 
 	while ( stackCount > 0 )
 	{
-		pair = stack[--stackCount];
-		for ( int i = 0; i < 2; ++i )
+		const b3WideNode* node = nodes + stack[--stackCount];
+
+		b3BoxW4 boxes = b3LoadBoxW4( node );
+		int mask = b3OverlapMaskW4( laneBox, &boxes );
+		if ( laneMoved == false )
 		{
-			const b3TreeNode* node = nodes + pair + i;
-			if ( ( ( node->flagIndex | proxyMark ) & B3_MOVED_NODE ) == 0 )
-			{
-				continue;
-			}
+			mask &= b3GetMovedMask( node );
+		}
 
-			if ( b3OverlapNode( boxv, node ) == false )
+		if ( b3IsLeaf( node ) )
+		{
+			while ( mask != 0 )
 			{
-				continue;
+				int lane = (int)b3CTZ32( (uint32_t)mask );
+				mask &= mask - 1;
+				b3AddCandidatePair( shapeId, (int)node->userData[lane], context );
 			}
+		}
+		else
+		{
+			while ( mask != 0 )
+			{
+				int lane = (int)b3CTZ32( (uint32_t)mask );
+				mask &= mask - 1;
 
-			if ( b3IsLeaf( node ) )
-			{
-				b3AddCandidatePair( shapeId, node->shapeIndex, context );
-			}
-			else
-			{
 				if ( stackCount < B3_TREE_STACK_SIZE )
 				{
-					stack[stackCount++] = b3GetLeftChild( node );
+					stack[stackCount++] = b3GetLaneIndex( node->child[lane] );
 				}
 				else
 				{
@@ -409,78 +395,153 @@ static void b3CollideProxyAndSubtree( const b3TreeNode* proxy, const b3TreeNode*
 	}
 }
 
-// Helper for b3CollideCrossPairs to avoid code duplication.
-B3_FORCE_INLINE void b3VisitPair( const b3TreeNode* arrayA, const b3TreeNode* arrayB, const b3TreeNode* nodeA,
-								  const b3TreeNode* nodeB, b3IndexPair* stack, int* stackCount, b3PairContext* context )
-{
-	if ( b3TestPair( nodeA, nodeB ) == false )
-	{
-		return;
-	}
-
-	bool leafA = b3IsLeaf( nodeA );
-	bool leafB = b3IsLeaf( nodeB );
-	if ( leafA && leafB )
-	{
-		b3AddCandidatePair( nodeA->shapeIndex, nodeB->shapeIndex, context );
-	}
-	else if ( leafA )
-	{
-		b3CollideProxyAndSubtree( nodeA, arrayB, b3GetLeftChild( nodeB ), context );
-	}
-	else if ( leafB )
-	{
-		b3CollideProxyAndSubtree( nodeB, arrayA, b3GetLeftChild( nodeA ), context );
-	}
-	else
-	{
-		if ( *stackCount < B3_TREE_STACK_SIZE )
-		{
-			stack[*stackCount] = B3_LITERAL( b3IndexPair ){ .a = b3GetLeftChild( nodeA ), .b = b3GetLeftChild( nodeB ) };
-			*stackCount += 1;
-		}
-		else
-		{
-			B3_ASSERT( *stackCount < B3_TREE_STACK_SIZE );
-		}
-	}
-}
-
-// This collides two sub-trees against each other. They can live in the same dynamic tree.
-// This can only generate pairs cross sub-tree, but not within a sub-tree. This fact means
-// this does not generate duplicate pairs.
-// For example consider the full binary tree A (B (D  E) C (F G))
+// This collides two sub-trees against each other lane by lane. They can live in the same
+// dynamic tree. This can only generate pairs cross sub-tree, but not within a sub-tree. This
+// fact means this does not generate duplicate pairs.
+// For example consider the tree A (B (D E) C (F G))
 // Colliding children of A (B and C) can give pairs (D,F) (D,G) (E,F) and (E,G).
 // Then colliding children of B can give the pair (D,E) and for C (F,G).
 // So no duplicates even when used for self-collision.
-// Whenever a proxy is moved, the flag is propagated up the hierarchy to the root. So
-// self collision gathers all those moved internal nodes and collides their subtrees together.
+// Whenever a proxy is moved, the flag is propagated up the lanes to the root. So
+// self collision gathers all those moved nodes and collides their lanes together.
 // See Real-time collision detection section 6.3.2. This is faster than querying every moved
 // proxy against the whole tree. Scaling is linear instead of linear * log.
 // Many other physics engines do this (Bepu, Rapier, etc). So nothing new here.
-static void b3CollideCrossPairs( const b3TreeNode* arrayA, const b3TreeNode* arrayB, const b3TreeNode* subtreeA,
-								 const b3TreeNode* subtreeB, b3PairContext* context )
+// Each lane of A is tested against the four lanes of B at once. When only one side is a leaf
+// it is made A and each of its lanes descends the subtrees of B on a local stack.
+static void b3CollideCrossPairs( const b3WideNode* arrayA, const b3WideNode* arrayB, int rootA, int rootB,
+								 b3PairContext* context )
 {
 	b3IndexPair stack[B3_TREE_STACK_SIZE];
 	int stackCount = 0;
-
-	// Seed the stack.
-	b3VisitPair( arrayA, arrayB, subtreeA, subtreeB, stack, &stackCount, context );
+	stack[stackCount++] = B3_LITERAL( b3IndexPair ){ .a = rootA, .b = rootB };
 
 	while ( stackCount > 0 )
 	{
 		b3IndexPair pair = stack[--stackCount];
-		for ( int i = 0; i < 2; ++i )
+		const b3WideNode* nodeA = arrayA + pair.a;
+		const b3WideNode* nodeB = arrayB + pair.b;
+		const b3WideNode* arrayOfB = arrayB;
+
+		bool leafA = b3IsLeaf( nodeA );
+		bool leafB = b3IsLeaf( nodeB );
+		if ( leafA == false && leafB )
 		{
-			for ( int j = 0; j < 2; ++j )
+			// Keep the leaf on the A side. Pairs are order free.
+			const b3WideNode* temp = nodeA;
+			nodeA = nodeB;
+			nodeB = temp;
+			arrayOfB = arrayA;
+			leafA = true;
+			leafB = false;
+		}
+
+		b3BoxW4 boxesB = b3LoadBoxW4( nodeB );
+		int movedB = b3GetMovedMask( nodeB );
+
+		for ( int i = 0; i < 4; ++i )
+		{
+			uint32_t childA = nodeA->child[i];
+			if ( b3IsLaneEmpty( childA ) )
 			{
-				b3VisitPair( arrayA, arrayB, arrayA + pair.a + i, arrayB + pair.b + j, stack, &stackCount, context );
+				continue;
+			}
+
+			b3BoxW4 laneBox = b3LaneBoxW4( nodeA, i );
+			int mask = b3OverlapMaskW4( &laneBox, &boxesB );
+			bool movedA = ( childA & B3_MOVED_NODE ) != 0;
+			if ( movedA == false )
+			{
+				mask &= movedB;
+			}
+
+			if ( leafA && leafB )
+			{
+				while ( mask != 0 )
+				{
+					int j = (int)b3CTZ32( (uint32_t)mask );
+					mask &= mask - 1;
+					b3AddCandidatePair( (int)nodeA->userData[i], (int)nodeB->userData[j], context );
+				}
+			}
+			else if ( leafA == false )
+			{
+				while ( mask != 0 )
+				{
+					int j = (int)b3CTZ32( (uint32_t)mask );
+					mask &= mask - 1;
+
+					if ( stackCount < B3_TREE_STACK_SIZE )
+					{
+						stack[stackCount++] = B3_LITERAL( b3IndexPair ){
+							.a = b3GetLaneIndex( childA ),
+							.b = b3GetLaneIndex( nodeB->child[j] ),
+						};
+					}
+					else
+					{
+						B3_ASSERT( stackCount < B3_TREE_STACK_SIZE );
+					}
+				}
+			}
+			else
+			{
+				while ( mask != 0 )
+				{
+					int j = (int)b3CTZ32( (uint32_t)mask );
+					mask &= mask - 1;
+					int childB = b3GetLaneIndex( nodeB->child[j] );
+					b3CollideLaneAndSubtree( &laneBox, movedA, (int)nodeA->userData[i], arrayOfB, childB, context );
+				}
 			}
 		}
 	}
 }
 
-// This takes moved internal nodes and collides their sub-trees against each other.
+// Collide the lanes of one node against each other. Every lane pair with a moved side and an
+// overlap is a candidate pair for a leaf node or a pair of subtrees for an internal node. The
+// descendants handle their own lanes, so nothing is descended here.
+static void b3CollideSelfNode( const b3WideNode* nodes, int nodeIndex, b3PairContext* context )
+{
+	const b3WideNode* node = nodes + nodeIndex;
+	bool leaf = b3IsLeaf( node );
+	b3BoxW4 boxes = b3LoadBoxW4( node );
+	int moved = b3GetMovedMask( node );
+
+	for ( int i = 0; i < 3; ++i )
+	{
+		uint32_t childI = node->child[i];
+		if ( b3IsLaneEmpty( childI ) )
+		{
+			continue;
+		}
+
+		// Lanes above i only, so each pair is tested once
+		b3BoxW4 laneBox = b3LaneBoxW4( node, i );
+		int mask = b3OverlapMaskW4( &laneBox, &boxes ) & ~( ( 1 << ( i + 1 ) ) - 1 );
+		if ( ( childI & B3_MOVED_NODE ) == 0 )
+		{
+			mask &= moved;
+		}
+
+		while ( mask != 0 )
+		{
+			int j = (int)b3CTZ32( (uint32_t)mask );
+			mask &= mask - 1;
+
+			if ( leaf )
+			{
+				b3AddCandidatePair( (int)node->userData[i], (int)node->userData[j], context );
+			}
+			else
+			{
+				b3CollideCrossPairs( nodes, nodes, b3GetLaneIndex( childI ), b3GetLaneIndex( node->child[j] ), context );
+			}
+		}
+	}
+}
+
+// This takes moved nodes and collides their lanes against each other.
 static void b3SelfPairsTask( int startIndex, int endIndex, int workerIndex, void* context )
 {
 	b3TracyCZoneNC( self_pairs, "Self", b3_colorCoral, true );
@@ -488,8 +549,8 @@ static void b3SelfPairsTask( int startIndex, int endIndex, int workerIndex, void
 	b3World* world = context;
 	b3BroadPhase* bp = &world->broadPhase;
 	const b3DynamicTree* tree = bp->trees + b3_dynamicBody;
-	const b3TreeNode* nodes = tree->nodes;
-	const int* siblingIndices = bp->movedSiblings;
+	const b3WideNode* nodes = tree->nodes;
+	const int* nodeIndices = bp->movedNodes;
 
 	b3PairContext pairContext = {
 		.world = world,
@@ -498,8 +559,7 @@ static void b3SelfPairsTask( int startIndex, int endIndex, int workerIndex, void
 
 	for ( int i = startIndex; i < endIndex; ++i )
 	{
-		int nodeIndex = siblingIndices[i];
-		b3CollideCrossPairs( nodes, nodes, nodes + nodeIndex, nodes + nodeIndex + 1, &pairContext );
+		b3CollideSelfNode( nodes, nodeIndices[i], &pairContext );
 	}
 
 	b3FlushCandidatePairs( &pairContext );
@@ -507,56 +567,75 @@ static void b3SelfPairsTask( int startIndex, int endIndex, int workerIndex, void
 	b3TracyCZoneEnd( self_pairs );
 }
 
-#define B3_CROSS_SEED_COUNT 64
+#define B3_CROSS_SEED_COUNT 128
 _Static_assert( ( B3_CROSS_SEED_COUNT & ( B3_CROSS_SEED_COUNT - 1 ) ) == 0, "must be power of 2" );
 
 // This does a serial cross-tree breadth first search until the queue is full. Then it returns
 // the queue pairs as seeds for a parallel search.
-static int b3GatherCrossSeeds( const b3DynamicTree* treeA, const b3DynamicTree* treeB, b3NodePair* seeds )
+static int b3GatherCrossSeeds( const b3DynamicTree* treeA, const b3DynamicTree* treeB, b3IndexPair* seeds )
 {
-	const b3TreeNode* nodesA = treeA->nodes;
-	const b3TreeNode* nodesB = treeB->nodes;
+	const b3WideNode* nodesA = treeA->nodes;
+	const b3WideNode* nodesB = treeB->nodes;
 
-	// Breadth-first search from the two roots as one pair. An empty tree has a sentinel root that
-	// survives nothing.
-	b3NodePair queue[2 * B3_CROSS_SEED_COUNT];
+	// Nothing moved on either side means no pairs. The roots have no lane of their own, so
+	// the first pop tests the root lanes against each other. An empty tree has inverted lanes
+	// that overlap nothing.
+	if ( b3HasMovedLane( nodesA + B3_ROOT_NODE ) == false && b3HasMovedLane( nodesB + B3_ROOT_NODE ) == false )
+	{
+		return 0;
+	}
+
+	// Breadth-first search from the two roots as one pair.
+	b3IndexPair queue[2 * B3_CROSS_SEED_COUNT];
 	int mask = 2 * B3_CROSS_SEED_COUNT - 1;
 	int head = 0;
 	int tail = 0;
 
-	const b3TreeNode* rootA = nodesA + B3_ROOT_NODE;
-	const b3TreeNode* rootB = nodesB + B3_ROOT_NODE;
-	if ( b3TestPair( rootA, rootB ) )
-	{
-		queue[tail & mask] = B3_LITERAL( b3NodePair ){ .a = *rootA, .b = *rootB };
-		tail += 1;
-	}
+	queue[tail & mask] = B3_LITERAL( b3IndexPair ){ .a = B3_ROOT_NODE, .b = B3_ROOT_NODE };
+	tail += 1;
 
+	// A popped pair can push up to sixteen lane pairs
 	int seedCount = 0;
-	while ( head < tail && seedCount + ( tail - head ) + 3 < B3_CROSS_SEED_COUNT )
+	while ( head < tail && seedCount + ( tail - head ) + 15 < B3_CROSS_SEED_COUNT )
 	{
-		b3NodePair pair = queue[head & mask];
+		b3IndexPair pair = queue[head & mask];
 		head += 1;
 
-		if ( b3IsLeaf( &pair.a ) || b3IsLeaf( &pair.b ) )
+		const b3WideNode* nodeA = nodesA + pair.a;
+		const b3WideNode* nodeB = nodesB + pair.b;
+		if ( b3IsLeaf( nodeA ) || b3IsLeaf( nodeB ) )
 		{
 			seeds[seedCount++] = pair;
 			continue;
 		}
 
-		const b3TreeNode* a = nodesA + b3GetLeftChild( &pair.a );
-		const b3TreeNode* b = nodesB + b3GetLeftChild( &pair.b );
+		b3BoxW4 boxesB = b3LoadBoxW4( nodeB );
+		int movedB = b3GetMovedMask( nodeB );
 
-		// Nodes have two children each, so four combinations.
-		for ( int i = 0; i < 2; ++i )
+		for ( int i = 0; i < 4; ++i )
 		{
-			for ( int j = 0; j < 2; ++j )
+			uint32_t childA = nodeA->child[i];
+			if ( b3IsLaneEmpty( childA ) )
 			{
-				if ( b3TestPair( a + i, b + j ) )
-				{
-					queue[tail & mask] = B3_LITERAL( b3NodePair ){ a[i], b[j] };
-					tail += 1;
-				}
+				continue;
+			}
+
+			b3BoxW4 laneBox = b3LaneBoxW4( nodeA, i );
+			int hitMask = b3OverlapMaskW4( &laneBox, &boxesB );
+			if ( ( childA & B3_MOVED_NODE ) == 0 )
+			{
+				hitMask &= movedB;
+			}
+
+			while ( hitMask != 0 )
+			{
+				int j = (int)b3CTZ32( (uint32_t)hitMask );
+				hitMask &= hitMask - 1;
+				queue[tail & mask] = B3_LITERAL( b3IndexPair ){
+					.a = b3GetLaneIndex( childA ),
+					.b = b3GetLaneIndex( nodeB->child[j] ),
+				};
+				tail += 1;
 			}
 		}
 	}
@@ -574,7 +653,7 @@ static int b3GatherCrossSeeds( const b3DynamicTree* treeA, const b3DynamicTree* 
 typedef struct b3CrossContext
 {
 	b3World* world;
-	const b3NodePair* seeds;
+	const b3IndexPair* seeds;
 	int staticSeedCount;
 	bool checkCompounds;
 } b3CrossContext;
@@ -586,9 +665,9 @@ static void b3CrossPairsTask( int startIndex, int endIndex, int workerIndex, voi
 	b3CrossContext* crossContext = context;
 	b3World* world = crossContext->world;
 	b3BroadPhase* bp = &world->broadPhase;
-	const b3TreeNode* staticNodes = bp->trees[b3_staticBody].nodes;
-	const b3TreeNode* kinematicNodes = bp->trees[b3_kinematicBody].nodes;
-	const b3TreeNode* dynamicNodes = bp->trees[b3_dynamicBody].nodes;
+	const b3WideNode* staticNodes = bp->trees[b3_staticBody].nodes;
+	const b3WideNode* kinematicNodes = bp->trees[b3_kinematicBody].nodes;
+	const b3WideNode* dynamicNodes = bp->trees[b3_dynamicBody].nodes;
 
 	b3PairContext pairContext = {
 		.world = world,
@@ -602,16 +681,16 @@ static void b3CrossPairsTask( int startIndex, int endIndex, int workerIndex, voi
 	pairContext.checkCompounds = crossContext->checkCompounds;
 	for ( int i = startIndex; i < staticEnd; ++i )
 	{
-		b3NodePair seed = crossContext->seeds[i];
-		b3CollideCrossPairs( dynamicNodes, staticNodes, &seed.a, &seed.b, &pairContext );
+		b3IndexPair seed = crossContext->seeds[i];
+		b3CollideCrossPairs( dynamicNodes, staticNodes, seed.a, seed.b, &pairContext );
 	}
 	b3FlushCandidatePairs( &pairContext );
 
 	pairContext.checkCompounds = false;
 	for ( int i = b3MaxInt( startIndex, crossContext->staticSeedCount ); i < endIndex; ++i )
 	{
-		b3NodePair seed = crossContext->seeds[i];
-		b3CollideCrossPairs( dynamicNodes, kinematicNodes, &seed.a, &seed.b, &pairContext );
+		b3IndexPair seed = crossContext->seeds[i];
+		b3CollideCrossPairs( dynamicNodes, kinematicNodes, seed.a, seed.b, &pairContext );
 	}
 	b3FlushCandidatePairs( &pairContext );
 
@@ -671,14 +750,14 @@ void b3UpdateBroadPhasePairs( b3World* world )
 	// Generate pairs by querying the dynamic body tree against itself and against
 	// the kinematic and static trees.
 	{
-		// Get the sibling pairs of the dynamic body tree that have moved.
+		// Get the nodes of the dynamic body tree that have a moved lane.
 		const b3DynamicTree* dynamicTree = bp->trees + b3_dynamicBody;
-		int pairCapacity = b3MaxInt( dynamicTree->nodeEnd / 2, 1 );
-		bp->movedSiblings = b3StackAlloc( alloc, pairCapacity * sizeof( int ), "moved pairs" );
-		int dynamicMoveCount = b3GatherMovedSiblings( dynamicTree, bp->movedSiblings );
+		int nodeCapacity = b3MaxInt( dynamicTree->nodeEnd, 1 );
+		bp->movedNodes = b3StackAlloc( alloc, nodeCapacity * sizeof( int ), "moved nodes" );
+		int dynamicMoveCount = b3GatherMovedNodes( dynamicTree, bp->movedNodes );
 
 		// Get seeds for colliding against the static and kinematic trees.
-		b3NodePair crossSeeds[2 * B3_CROSS_SEED_COUNT];
+		b3IndexPair crossSeeds[2 * B3_CROSS_SEED_COUNT];
 		int staticSeedCount = b3GatherCrossSeeds( dynamicTree, bp->trees + b3_staticBody, crossSeeds );
 		B3_ASSERT( staticSeedCount <= B3_CROSS_SEED_COUNT );
 		int kinematicSeedCount = b3GatherCrossSeeds( dynamicTree, bp->trees + b3_kinematicBody, crossSeeds + staticSeedCount );
@@ -773,8 +852,8 @@ void b3UpdateBroadPhasePairs( b3World* world )
 
 	b3StackFree( alloc, pairKeys );
 
-	b3StackFree( alloc, bp->movedSiblings );
-	bp->movedSiblings = NULL;
+	b3StackFree( alloc, bp->movedNodes );
+	bp->movedNodes = NULL;
 
 	b3ValidateSolverSets( world );
 

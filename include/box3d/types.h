@@ -1769,43 +1769,47 @@ typedef struct b3TOIOutput
 
 /**
  * @defgroup tree Dynamic Tree
- * The dynamic tree is a binary AABB tree to organize and query large numbers of geometric objects
+ * The dynamic tree is a 4-ary AABB tree to organize and query large numbers of geometric objects
  *
- * Box3D uses the dynamic tree internally to sort collision shapes into a binary bounding volume
+ * Box3D uses the dynamic tree internally to sort collision shapes into a bounding volume
  * hierarchy. This data structure may have uses in games for organizing other geometry data and may
  * be used independently of Box3D rigid body simulation.
  *
- * A dynamic AABB tree broad-phase, inspired by Nathanael Presson's btDbvt.
- * A dynamic tree arranges data in a binary tree to accelerate
- * queries such as AABB queries and ray casts. Leaf nodes are proxies
- * with an AABB. These are used to hold a user collision object.
- * Nodes are pooled and relocatable, so I use node indices rather than pointers.
+ * Every node holds the bounding boxes of its four children transposed, so a query box is tested
+ * against four children at once with 4-wide SIMD. The layout follows the Unity Physics bounding
+ * volume hierarchy. Leaf nodes hold up to four proxies, each with an AABB and user data.
+ * Nodes are pooled and relocatable, so node indices are used rather than pointers.
  * The dynamic tree is made available for advanced users that would like to use it to organize
  * spatial game data besides rigid bodies.
  * @{
  */
 
-/// A node in the dynamic tree. Siblings sit together at an even index so two nodes fit in
-/// a 64 byte cache line. The root is at index zero and index one always empty.
-typedef struct b3TreeNode
+/// A node in the dynamic tree holding the bounding boxes of four children transposed so a
+/// query box is tested against all four with one set of 4-wide compares. Two cache lines.
+/// A node is either a leaf node, where every lane is a proxy, or an internal node, where every
+/// lane is a child node. A subtree's box and moved flag live in the lane of its parent. The
+/// root is at index zero and has no lane. An empty lane has a lower bound of +infinity and an
+/// upper bound of -infinity, so it fails every overlap test.
+typedef struct b3WideNode
 {
-	/// The node bounding box
-	b3AABB aabb; // 24
+	/// Lower and upper bounds along x for each lane
+	float lowerX[4], upperX[4];
 
-	/// bit 31 : 1 for leaf node
-	/// bit 30 : 1 for moved flag
-	/// bits 0-29 : index of the sibling pair node or the proxy id for a leaf
-	uint32_t flagIndex; // 4
+	/// Lower and upper bounds along y for each lane
+	float lowerY[4], upperY[4];
 
-	union
-	{
-		/// The height of an internal node. A leaf has zero height.
-		int32_t height;
+	/// Lower and upper bounds along z for each lane
+	float lowerZ[4], upperZ[4];
 
-		/// The shape index for a leaf. Truncated from proxy user data.
-		int32_t shapeIndex;
-	}; // 4
-} b3TreeNode;
+	/// bit 31 : 1 for a leaf node, set on every lane of the node including empty lanes
+	/// bit 30 : 1 for moved lane
+	/// bits 0-29 : child node index or the proxy id for a leaf lane, all ones for an empty lane
+	uint32_t child[4];
+
+	/// The user data of each leaf lane, truncated from the proxy user data. This is the shape index
+	/// in the broad-phase and the child index in a compound shape.
+	uint32_t userData[4];
+} b3WideNode;
 
 /// Separate storage for tree leaves.
 typedef struct b3TreeProxy
@@ -1816,15 +1820,15 @@ typedef struct b3TreeProxy
 	/// Category bits for collision filtering.
 	uint64_t categoryBits;
 
-	/// The leaf node. B3_NULL_INDEX for a free proxy.
-	int32_t node;
+	/// The leaf lane reference, 4 * node index + lane. B3_NULL_INDEX for a free proxy.
+	int32_t leaf;
 
 	/// Next free proxy.
 	int32_t next;
 } b3TreeProxy;
 
 /// Dynamic tree version for compatibility testing.
-#define B3_DYNAMIC_TREE_VERSION 0x1D6F4C2A73B80E91ull
+#define B3_DYNAMIC_TREE_VERSION 0x4A7E19C3D58B2F06ull
 
 /// The dynamic tree structure. This should be considered private data.
 /// It is placed here for performance reasons.
@@ -1834,11 +1838,10 @@ typedef struct b3DynamicTree
 	/// if the tree is serialized.
 	uint64_t version;
 
-	/// Array of nodes. The root is at index zero and index 1 is empty.
-	/// Otherwise siblings are paired at even indices. Has holes for free node pairs.
-	b3TreeNode* nodes;
+	/// Array of nodes. The root is at index zero. Has holes for free nodes.
+	b3WideNode* nodes;
 
-	/// Parent index per node. The free list is interweaved.
+	/// Parent lane reference per node, 4 * parent index + lane. The free list is interweaved.
 	int32_t* parents;
 
 	/// Proxy data split from node array as cold data.
@@ -1850,8 +1853,8 @@ typedef struct b3DynamicTree
 	/// The allocated node space
 	int32_t nodeCapacity;
 
-	/// Free pairs below nodeEnd
-	int32_t pairFreeList;
+	/// Free nodes below nodeEnd
+	int32_t nodeFreeList;
 
 	/// Number of proxies created
 	int32_t proxyCount;
@@ -1863,22 +1866,22 @@ typedef struct b3DynamicTree
 	int32_t proxyFreeList;
 
 	/// Array of nodes for rebuild.
-	b3TreeNode* swapNodes;
+	b3WideNode* swapNodes;
 
-	/// Leaf indices for rebuild
+	/// Build leaf permutation for rebuild
 	int32_t* leafIndices;
 
-	/// Leaves for the rebuild. May represent a proxy or a retained subtree.
-	b3TreeNode* leafNodes;
+	/// Build leaf references for the rebuild. A proxy id or a retained subtree root lane.
+	int32_t* leafRefs;
 
-	/// Leaf bounding boxes for rebuild
+	/// Build leaf bounding boxes for rebuild
 	b3AABB* leafBoxes;
 
-	/// Leaf bounding box centers for rebuild
+	/// Build leaf bounding box centers for rebuild
 	b3Vec3* leafCenters;
 
-	/// Bins for sorting during rebuild
-	int32_t* binIndices;
+	/// Nodes created by the rebuild that need their lanes filled bottom up
+	int32_t* builtNodes;
 
 	/// Allocated space for rebuilding
 	int32_t rebuildCapacity;

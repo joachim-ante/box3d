@@ -12,3 +12,8 @@ CMakeUserPresets.json
 .fetchcontent-cache/
 *.b3rec
 *.zip
+/build-double
+/build-scalar
+/build-samples
+/build-samples
+/build-release

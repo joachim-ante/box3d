@@ -1151,15 +1151,19 @@ static int SpeculativeOffRecycleTest( void )
 	return 0;
 }
 
+// Counts moved lanes. Free nodes are empty leaf nodes without moved lanes.
 static int CountMovedNodes( const b3DynamicTree* tree )
 {
 	int count = 0;
 	for ( int i = 0; i < tree->nodeEnd; ++i )
 	{
-		const b3TreeNode* node = tree->nodes + i;
-		if ( b3IsEmptyNode( node ) == false && b3IsNodeMoved( node ) )
+		const b3WideNode* node = tree->nodes + i;
+		for ( int lane = 0; lane < 4; ++lane )
 		{
-			count += 1;
+			if ( b3IsLaneMoved( node->child[lane] ) )
+			{
+				count += 1;
+			}
 		}
 	}
 

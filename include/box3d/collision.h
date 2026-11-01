@@ -82,7 +82,7 @@ B3_API b3TreeStats b3DynamicTree_RayCast( const b3DynamicTree* tree, const b3Ray
 B3_API b3TreeStats b3DynamicTree_BoxCast( const b3DynamicTree* tree, const b3BoxCastInput* input, uint64_t maskBits,
 										  bool requireAllBits, b3TreeBoxCastCallbackFcn* callback, void* context );
 
-/// Get the height of the binary tree.
+/// Get the height of the tree. A leaf node has zero height.
 B3_API int b3DynamicTree_GetHeight( const b3DynamicTree* tree );
 
 /// Get the ratio of the sum of the node areas to the root area.
@@ -121,7 +121,17 @@ B3_INLINE uint64_t b3DynamicTree_GetUserData( const b3DynamicTree* tree, int pro
 /// Get the AABB of a proxy
 B3_INLINE b3AABB b3DynamicTree_GetAABB( const b3DynamicTree* tree, int proxyId )
 {
-	return tree->nodes[tree->proxies[proxyId].node].aabb;
+	int leaf = tree->proxies[proxyId].leaf;
+	const b3WideNode* node = tree->nodes + ( leaf >> 2 );
+	int lane = leaf & 3;
+	b3AABB aabb;
+	aabb.lowerBound.x = node->lowerX[lane];
+	aabb.lowerBound.y = node->lowerY[lane];
+	aabb.lowerBound.z = node->lowerZ[lane];
+	aabb.upperBound.x = node->upperX[lane];
+	aabb.upperBound.y = node->upperY[lane];
+	aabb.upperBound.z = node->upperZ[lane];
+	return aabb;
 }
 
 /**@}*/ // tree

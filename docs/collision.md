@@ -426,13 +426,17 @@ determine whether a speculative point actually had an interaction during the ste
 
 ## Dynamic Tree
 
-`b3DynamicTree` organizes large numbers of AABBs into a hierarchical binary tree
+`b3DynamicTree` organizes large numbers of AABBs into a hierarchical 4-ary tree
 for fast ray casts and region queries. Box3D uses it internally to manage the
-broad phase, but it is also available for organizing spatial game data unrelated
-to physics.
+broad phase and compound shapes, but it is also available for organizing spatial
+game data unrelated to physics.
 
-Each tree node stores a `b3AABB` and a 64-bit `userData` value. Internal nodes
-have two children; leaf nodes are proxies you manage directly.
+Each tree node (`b3WideNode`) stores the bounding boxes of its four children
+transposed, so a query box is tested against all four with 4-wide SIMD. An
+internal node holds four child nodes; a leaf node holds four proxies, which are
+the AABBs you manage directly, each with a 64-bit `userData` value. Moving a
+proxy marks the lanes above it and the tree refits and partially rebuilds the
+marked parts, leaving untouched subtrees alone.
 
 ```c
 // Create a tree with an initial proxy capacity

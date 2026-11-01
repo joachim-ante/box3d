@@ -63,7 +63,7 @@ static uint32_t b3ComputeLayoutHash( void )
 	MIX( sizeof( b3SolverSet ) )
 	MIX( sizeof( b3GraphColor ) )
 	MIX( sizeof( b3DynamicTree ) )
-	MIX( sizeof( b3TreeNode ) )
+	MIX( sizeof( b3WideNode ) )
 	MIX( sizeof( b3TreeProxy ) )
 	MIX( sizeof( b3HullData ) )
 	MIX( sizeof( b3HullVertex ) )
@@ -299,20 +299,20 @@ static void b3DesHashSet( b3SnapReader* r, b3HashSet* hs )
 }
 
 // DynamicTree: version, scalars, then nodes and parents to nodeEnd and proxies at capacity.
-// The empty node and the free pairs are sentinels below the end and travel as they are. Only the
+// The free nodes are empty leaf nodes below the end and travel as they are. Only the
 // stale tail above the end, the spare array and the rebuild scratch are skipped.
 static void b3SerTree( b3RecBuffer* buf, const b3DynamicTree* tree )
 {
 	b3SnapW_Bytes( buf, &tree->version, sizeof( uint64_t ) );
 	b3SnapW_I32( buf, tree->nodeEnd );
-	b3SnapW_I32( buf, tree->pairFreeList );
+	b3SnapW_I32( buf, tree->nodeFreeList );
 	b3SnapW_I32( buf, tree->proxyCount );
 	b3SnapW_I32( buf, tree->proxyCapacity );
 	b3SnapW_I32( buf, tree->proxyFreeList );
 	b3SnapW_I32( buf, tree->dfsOrdered ? 1 : 0 );
 	if ( tree->nodeEnd > 0 )
 	{
-		b3SnapW_Bytes( buf, tree->nodes, tree->nodeEnd * (int)sizeof( b3TreeNode ) );
+		b3SnapW_Bytes( buf, tree->nodes, tree->nodeEnd * (int)sizeof( b3WideNode ) );
 		b3SnapW_Bytes( buf, tree->parents, tree->nodeEnd * (int)sizeof( int32_t ) );
 	}
 	if ( tree->proxyCapacity > 0 )
@@ -326,13 +326,13 @@ static void b3DesTree( b3SnapReader* r, b3DynamicTree* tree )
 	uint64_t version = 0;
 	b3SnapR_Bytes( r, &version, sizeof( uint64_t ) );
 	int nodeEnd = b3SnapR_I32( r );
-	int pairFreeList = b3SnapR_I32( r );
+	int nodeFreeList = b3SnapR_I32( r );
 	int proxyCount = b3SnapR_I32( r );
 	int proxyCapacity = b3SnapR_I32( r );
 	int proxyFreeList = b3SnapR_I32( r );
 	bool dfsOrdered = b3SnapR_I32( r ) != 0;
 
-	if ( r->ok && b3SnapCheckCount( r, nodeEnd, (int)sizeof( b3TreeNode ), (int)sizeof( b3TreeNode ) ) == false )
+	if ( r->ok && b3SnapCheckCount( r, nodeEnd, (int)sizeof( b3WideNode ), (int)sizeof( b3WideNode ) ) == false )
 	{
 		r->ok = false;
 	}
@@ -342,30 +342,30 @@ static void b3DesTree( b3SnapReader* r, b3DynamicTree* tree )
 		r->ok = false;
 	}
 
-	if ( r->ok && ( nodeEnd < 2 || ( nodeEnd & 1 ) != 0 || proxyCapacity < 1 ) )
+	if ( r->ok && ( nodeEnd < 1 || proxyCapacity < 1 ) )
 	{
 		r->ok = false;
 	}
 
 	// Free existing allocation including the spare array and any rebuild scratch
-	b3Free( tree->nodes, tree->nodeCapacity * (int)sizeof( b3TreeNode ) );
+	b3Free( tree->nodes, tree->nodeCapacity * (int)sizeof( b3WideNode ) );
 	b3Free( tree->parents, tree->nodeCapacity * (int)sizeof( int32_t ) );
 	b3Free( tree->proxies, tree->proxyCapacity * (int)sizeof( b3TreeProxy ) );
-	b3Free( tree->swapNodes, tree->nodeCapacity * (int)sizeof( b3TreeNode ) );
+	b3Free( tree->swapNodes, tree->nodeCapacity * (int)sizeof( b3WideNode ) );
 	b3Free( tree->leafIndices, tree->rebuildCapacity * (int)sizeof( int ) );
-	b3Free( tree->leafNodes, tree->rebuildCapacity * (int)sizeof( b3TreeNode ) );
+	b3Free( tree->leafRefs, tree->rebuildCapacity * (int)sizeof( int ) );
 	b3Free( tree->leafBoxes, tree->rebuildCapacity * (int)sizeof( b3AABB ) );
 	b3Free( tree->leafCenters, tree->rebuildCapacity * (int)sizeof( b3Vec3 ) );
-	b3Free( tree->binIndices, tree->rebuildCapacity * (int)sizeof( int ) );
+	b3Free( tree->builtNodes, tree->rebuildCapacity * (int)sizeof( int ) );
 	tree->nodes = NULL;
 	tree->parents = NULL;
 	tree->proxies = NULL;
 	tree->swapNodes = NULL;
 	tree->leafIndices = NULL;
-	tree->leafNodes = NULL;
+	tree->leafRefs = NULL;
 	tree->leafBoxes = NULL;
 	tree->leafCenters = NULL;
-	tree->binIndices = NULL;
+	tree->builtNodes = NULL;
 	tree->nodeEnd = 0;
 	tree->nodeCapacity = 0;
 	tree->proxyCapacity = 0;
@@ -379,15 +379,15 @@ static void b3DesTree( b3SnapReader* r, b3DynamicTree* tree )
 	tree->version = version;
 	tree->nodeEnd = nodeEnd;
 	tree->nodeCapacity = nodeEnd;
-	tree->pairFreeList = pairFreeList;
+	tree->nodeFreeList = nodeFreeList;
 	tree->proxyCount = proxyCount;
 	tree->proxyCapacity = proxyCapacity;
 	tree->proxyFreeList = proxyFreeList;
 	tree->dfsOrdered = dfsOrdered;
 
-	tree->nodes = (b3TreeNode*)b3Alloc( nodeEnd * (int)sizeof( b3TreeNode ) );
+	tree->nodes = (b3WideNode*)b3Alloc( nodeEnd * (int)sizeof( b3WideNode ) );
 	tree->parents = (int32_t*)b3Alloc( nodeEnd * (int)sizeof( int32_t ) );
-	b3SnapR_Bytes( r, tree->nodes, nodeEnd * (int)sizeof( b3TreeNode ) );
+	b3SnapR_Bytes( r, tree->nodes, nodeEnd * (int)sizeof( b3WideNode ) );
 	b3SnapR_Bytes( r, tree->parents, nodeEnd * (int)sizeof( int32_t ) );
 
 	tree->proxies = (b3TreeProxy*)b3Alloc( proxyCapacity * (int)sizeof( b3TreeProxy ) );

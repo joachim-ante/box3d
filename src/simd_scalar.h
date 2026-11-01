@@ -177,6 +177,40 @@ static inline b3FloatW4 b3EqualsW4( b3FloatW4 a, b3FloatW4 b )
 	return r;
 }
 
+static inline b3FloatW4 b3LessEqW4( b3FloatW4 a, b3FloatW4 b )
+{
+	b3FloatW4 r;
+	r.x = a.x <= b.x ? 1.0f : 0.0f;
+	r.y = a.y <= b.y ? 1.0f : 0.0f;
+	r.z = a.z <= b.z ? 1.0f : 0.0f;
+	r.w = a.w <= b.w ? 1.0f : 0.0f;
+	return r;
+}
+
+static inline b3FloatW4 b3GreaterEqW4( b3FloatW4 a, b3FloatW4 b )
+{
+	b3FloatW4 r;
+	r.x = a.x >= b.x ? 1.0f : 0.0f;
+	r.y = a.y >= b.y ? 1.0f : 0.0f;
+	r.z = a.z >= b.z ? 1.0f : 0.0f;
+	r.w = a.w >= b.w ? 1.0f : 0.0f;
+	return r;
+}
+
+static inline float b3HorizontalMinW4( b3FloatW4 a )
+{
+	float m = a.x <= a.y ? a.x : a.y;
+	m = m <= a.z ? m : a.z;
+	return m <= a.w ? m : a.w;
+}
+
+static inline float b3HorizontalMaxW4( b3FloatW4 a )
+{
+	float m = a.x >= a.y ? a.x : a.y;
+	m = m >= a.z ? m : a.z;
+	return m >= a.w ? m : a.w;
+}
+
 static inline bool b3AllZeroW4( b3FloatW4 a )
 {
 	return a.x == 0.0f && a.y == 0.0f && a.z == 0.0f && a.w == 0.0f;
@@ -244,11 +278,6 @@ B3_FORCE_INLINE bool b3OverlapAABBV( b3AABBV a, b3AABBV b )
 		   b.lowerBound.x <= a.upperBound.x && b.lowerBound.y <= a.upperBound.y && b.lowerBound.z <= a.upperBound.z;
 }
 
-B3_FORCE_INLINE bool b3OverlapNode( b3AABBV av, const b3TreeNode* node )
-{
-	return b3OverlapAABBV( av, node->aabb );
-}
-
 B3_FORCE_INLINE bool b3OverlapV( const b3AABB* a, const b3AABB* b )
 {
 	return b3OverlapAABBV( *a, *b );
@@ -257,11 +286,6 @@ B3_FORCE_INLINE bool b3OverlapV( const b3AABB* a, const b3AABB* b )
 B3_FORCE_INLINE b3AABBV b3UnionAABBV( b3AABBV a, b3AABBV b )
 {
 	return b3AABB_Union( a, b );
-}
-
-B3_FORCE_INLINE b3AABBV b3UnionPairV( const b3TreeNode* pair )
-{
-	return b3AABB_Union( pair[0].aabb, pair[1].aabb );
 }
 
 B3_FORCE_INLINE void b3StoreAABBV( b3AABB* aabb, b3AABBV value, bool condition )

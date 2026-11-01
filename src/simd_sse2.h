@@ -133,6 +133,30 @@ static inline b3FloatW4 b3EqualsW4( b3FloatW4 a, b3FloatW4 b )
 	return _mm_cmpeq_ps( a, b );
 }
 
+static inline b3FloatW4 b3LessEqW4( b3FloatW4 a, b3FloatW4 b )
+{
+	return _mm_cmple_ps( a, b );
+}
+
+static inline b3FloatW4 b3GreaterEqW4( b3FloatW4 a, b3FloatW4 b )
+{
+	return _mm_cmpge_ps( a, b );
+}
+
+static inline float b3HorizontalMinW4( b3FloatW4 a )
+{
+	a = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 2, 3, 0, 1 ) ) );
+	a = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+	return _mm_cvtss_f32( a );
+}
+
+static inline float b3HorizontalMaxW4( b3FloatW4 a )
+{
+	a = _mm_max_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 2, 3, 0, 1 ) ) );
+	a = _mm_max_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+	return _mm_cvtss_f32( a );
+}
+
 static inline bool b3AllZeroW4( b3FloatW4 a )
 {
 	// Compare each element with zero
@@ -371,11 +395,6 @@ B3_FORCE_INLINE bool b3OverlapAABBV( b3AABBV a, b3AABBV b )
 	return ( _mm_movemask_ps( test ) & 0x7 ) == 0x7;
 }
 
-B3_FORCE_INLINE bool b3OverlapNode( b3AABBV av, const b3TreeNode* node )
-{
-	return b3OverlapAABBV( av, b3LoadAABBV( &node->aabb ) );
-}
-
 B3_FORCE_INLINE bool b3OverlapV( const b3AABB* a, const b3AABB* b )
 {
 	return b3OverlapAABBV( b3LoadAABBV( a ), b3LoadAABBV( b ) );
@@ -387,11 +406,6 @@ B3_FORCE_INLINE b3AABBV b3UnionAABBV( b3AABBV a, b3AABBV b )
 	result.lower = _mm_min_ps( a.lower, b.lower );
 	result.upper = _mm_max_ps( a.upper, b.upper );
 	return result;
-}
-
-B3_FORCE_INLINE b3AABBV b3UnionPairV( const b3TreeNode* pair )
-{
-	return b3UnionAABBV( b3LoadAABBV( &pair[0].aabb ), b3LoadAABBV( &pair[1].aabb ) );
 }
 
 // Conditionally store an AABB. Avoids a branch.

@@ -272,6 +272,8 @@ b3CompoundData* b3CreateCompound( const b3CompoundDef* def )
 		return NULL;
 	}
 
+	// Every proxy carries its child index as user data, which the tree view reads straight from
+	// the leaf lanes since the compound has no proxy array.
 	b3DynamicTree tree = b3DynamicTree_Create( shapeCount );
 
 	int childIndex = 0;
@@ -491,7 +493,7 @@ b3CompoundData* b3CreateCompound( const b3CompoundDef* def )
 	// Tree nodes. The rebuild is dense, so only the live nodes travel.
 	size_t byteCount = b3AlignUp8( sizeof( b3CompoundData ) );
 	int nodeOffset = (int)byteCount;
-	byteCount += b3AlignUp8( tree.nodeEnd * sizeof( b3TreeNode ) );
+	byteCount += b3AlignUp8( tree.nodeEnd * sizeof( b3WideNode ) );
 	int materialOffset = (int)byteCount;
 	byteCount += b3AlignUp8( materialCount * sizeof( b3SurfaceMaterial ) );
 	int capsuleOffset = (int)byteCount;
@@ -556,8 +558,8 @@ b3CompoundData* b3CreateCompound( const b3CompoundDef* def )
 	compound->sphereCount = sphereCount;
 
 	// Tree nodes
-	b3TreeNode* nodes = (b3TreeNode*)( (intptr_t)compound + nodeOffset );
-	memcpy( nodes, tree.nodes, tree.nodeEnd * sizeof( b3TreeNode ) );
+	b3WideNode* nodes = (b3WideNode*)( (intptr_t)compound + nodeOffset );
+	memcpy( nodes, tree.nodes, tree.nodeEnd * sizeof( b3WideNode ) );
 
 	// Materials
 	B3_ASSERT( materialCount > 0 );
@@ -676,12 +678,12 @@ const b3CompoundData* b3ValidateCompound( const uint8_t* bytes, int byteCount )
 		return NULL;
 	}
 
-	if ( compound->nodeCount < 2 )
+	if ( compound->nodeCount < 1 )
 	{
 		return NULL;
 	}
 
-	int64_t nodeEnd = (int64_t)compound->nodeOffset + (int64_t)compound->nodeCount * (int64_t)sizeof( b3TreeNode );
+	int64_t nodeEnd = (int64_t)compound->nodeOffset + (int64_t)compound->nodeCount * (int64_t)sizeof( b3WideNode );
 	if ( nodeEnd > byteCount )
 	{
 		return NULL;

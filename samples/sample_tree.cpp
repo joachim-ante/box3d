@@ -89,9 +89,8 @@ public:
 		b3DynamicTree_Destroy( &m_tree );
 	}
 
-	// Breath-first search to compute node depth values start with 0 at the root.
-	// The tree is walked a sibling pair at a time, so depth is tracked alongside
-	// each queued pair rather than looked up through the parent index.
+	// Breath-first search to compute node depth values start with 0 at the root. The lanes of
+	// a node at depth d are the boxes of its children at depth d + 1.
 	int ComputeDepths()
 	{
 		m_depths.resize( m_tree.nodeCapacity, 0 );
@@ -101,17 +100,11 @@ public:
 			return 0;
 		}
 
-		b3TreeNode* nodes = m_tree.nodes;
-		m_depths[B3_ROOT_NODE] = 0;
-
-		if ( b3IsLeaf( nodes + B3_ROOT_NODE ) )
-		{
-			return 0;
-		}
+		b3WideNode* nodes = m_tree.nodes;
 
 		struct QueueItem
 		{
-			int pair;
+			int index;
 			int depth;
 		};
 
@@ -119,7 +112,7 @@ public:
 		int front = 0;
 		int back = 0;
 
-		queue[back++] = { b3GetLeftChild( nodes + B3_ROOT_NODE ), 1 };
+		queue[back++] = { B3_ROOT_NODE, 0 };
 
 		int depth = 0;
 
@@ -127,18 +120,23 @@ public:
 		{
 			QueueItem item = queue[front++];
 			depth = b3MaxInt( depth, item.depth );
+			m_depths[item.index] = item.depth;
 
-			for ( int i = 0; i < 2; ++i )
+			b3WideNode* node = nodes + item.index;
+			if ( b3IsLeaf( node ) )
 			{
-				int index = item.pair + i;
-				b3TreeNode* node = nodes + index;
-				m_depths[index] = item.depth;
+				continue;
+			}
 
-				if ( b3IsLeaf( node ) == false )
+			for ( int lane = 0; lane < 4; ++lane )
+			{
+				if ( b3IsLaneEmpty( node->child[lane] ) )
 				{
-					B3_ASSERT( back < m_tree.nodeEnd );
-					queue[back++] = { b3GetLeftChild( node ), item.depth + 1 };
+					continue;
 				}
+
+				B3_ASSERT( back < m_tree.nodeEnd );
+				queue[back++] = { b3GetLaneIndex( node->child[lane] ), item.depth + 1 };
 			}
 		}
 
@@ -298,26 +296,35 @@ public:
 
 		for ( int i = 0; i < m_tree.nodeEnd; ++i )
 		{
-			b3TreeNode* node = m_tree.nodes + i;
+			b3WideNode* node = m_tree.nodes + i;
 
-			if ( b3IsLeaf( node ) == false || b3IsEmptyNode( node ) )
+			// Free nodes are empty leaf nodes
+			if ( b3IsLeaf( node ) == false )
 			{
 				continue;
 			}
 
-			Proxy proxy = {};
-			proxy.aabb = node->aabb;
-
-			float area = b3AABB_Area( proxy.aabb );
-			if ( area > maxArea )
+			for ( int lane = 0; lane < 4; ++lane )
 			{
-				maxArea = area;
-				maxAreaIndex = (int)m_proxies.size();
-			}
+				if ( b3IsLaneEmpty( node->child[lane] ) )
+				{
+					continue;
+				}
 
-			int proxyId = b3GetProxyId( node );
-			proxy.proxyId = proxyId;
-			m_proxies[m_tree.proxies[proxyId].userData] = proxy;
+				Proxy proxy = {};
+				proxy.aabb = b3GetLaneAABB( node, lane );
+
+				float area = b3AABB_Area( proxy.aabb );
+				if ( area > maxArea )
+				{
+					maxArea = area;
+					maxAreaIndex = (int)m_proxies.size();
+				}
+
+				int proxyId = b3GetLaneIndex( node->child[lane] );
+				proxy.proxyId = proxyId;
+				m_proxies[m_tree.proxies[proxyId].userData] = proxy;
+			}
 		}
 
 		printf( "max index = %d\n", maxAreaIndex );
@@ -374,7 +381,7 @@ public:
 	{
 		srand( 42 );
 
-		b3AABB bounds = m_tree.nodes[B3_ROOT_NODE].aabb;
+		b3AABB bounds = b3DynamicTree_GetRootBounds( &m_tree );
 		b3Vec3 extents = b3AABB_Extents( bounds );
 		float radius = ( extents.x + extents.y + extents.z ) / 3.0f;
 
@@ -507,7 +514,7 @@ public:
 		}
 
 		b3Pos cp = m_camera->DrawOrigin();
-		b3TreeNode* nodes = m_tree.nodes;
+		b3WideNode* nodes = m_tree.nodes;
 		float distSquared = m_drawDistance * m_drawDistance * 1000.0f * 1000.0f;
 
 		if ( m_drawLevel >= 0 )
@@ -520,50 +527,67 @@ public:
 				b3_colorCoral,	   b3_colorCornflowerBlue, b3_colorCornsilk,	   b3_colorCrimson,	   b3_colorCyan,
 			};
 
+			// The lanes of the nodes at this depth. Free nodes have no lanes.
 			for ( int i = 0; i < m_tree.nodeEnd; ++i )
 			{
-				b3TreeNode* node = nodes + i;
-				if ( m_depths[i] != m_drawLevel || b3IsEmptyNode( node ) )
+				b3WideNode* node = nodes + i;
+				if ( m_depths[i] != m_drawLevel )
 				{
 					continue;
 				}
 
-				b3Vec3 c = b3AABB_Center( node->aabb );
-				if ( m_drawLevel < 10 || b3LengthSquared( b3SubPos( cp, b3ToPos( c ) ) ) < distSquared )
+				for ( int lane = 0; lane < 4; ++lane )
 				{
-					DrawBounds( node->aabb, 0.0f, MakeColor( colors[m_drawLevel % colorCount] ) );
+					if ( b3IsLaneEmpty( node->child[lane] ) )
+					{
+						continue;
+					}
+
+					b3AABB aabb = b3GetLaneAABB( node, lane );
+					b3Vec3 c = b3AABB_Center( aabb );
+					if ( m_drawLevel < 10 || b3LengthSquared( b3SubPos( cp, b3ToPos( c ) ) ) < distSquared )
+					{
+						DrawBounds( aabb, 0.0f, MakeColor( colors[m_drawLevel % colorCount] ) );
+					}
 				}
 			}
 		}
 		else
 		{
-			// Live leaves only. A mark on a leaf says its ancestors still need a refit, the
+			// Live leaves only. A mark on a leaf lane says its ancestors still need a refit, the
 			// leaf box itself is already current, so moved leaves still draw.
 			for ( int i = 0; i < m_tree.nodeEnd; ++i )
 			{
-				b3TreeNode* node = nodes + i;
+				b3WideNode* node = nodes + i;
 
-				if ( b3IsEmptyNode( node ) || b3IsLeaf( node ) == false )
+				if ( b3IsLeaf( node ) == false )
 				{
 					continue;
 				}
 
-				b3Vec3 c = b3AABB_Center( node->aabb );
-				if ( b3LengthSquared( b3SubPos( cp, b3ToPos( c ) ) ) > distSquared )
+				for ( int lane = 0; lane < 4; ++lane )
 				{
-					continue;
-				}
+					if ( b3IsLaneEmpty( node->child[lane] ) )
+					{
+						continue;
+					}
 
-				Proxy& proxy = m_proxies[m_tree.proxies[b3GetProxyId( node )].userData];
-				if ( proxy.queryTimeStamp == m_timeStamp || proxy.rayTimeStamp == m_timeStamp )
-				{
-					DrawBounds( node->aabb, 0.0f, MakeColor( b3_colorLightGray ) );
-				}
-				else
-				{
-					// float extension = 0.01f * node->height;
-					float extension = 0.0f;
-					DrawBounds( node->aabb, extension, MakeColor( b3_colorLightBlue ) );
+					b3AABB aabb = b3GetLaneAABB( node, lane );
+					b3Vec3 c = b3AABB_Center( aabb );
+					if ( b3LengthSquared( b3SubPos( cp, b3ToPos( c ) ) ) > distSquared )
+					{
+						continue;
+					}
+
+					Proxy& proxy = m_proxies[m_tree.proxies[b3GetLaneIndex( node->child[lane] )].userData];
+					if ( proxy.queryTimeStamp == m_timeStamp || proxy.rayTimeStamp == m_timeStamp )
+					{
+						DrawBounds( aabb, 0.0f, MakeColor( b3_colorLightGray ) );
+					}
+					else
+					{
+						DrawBounds( aabb, 0.0f, MakeColor( b3_colorLightBlue ) );
+					}
 				}
 			}
 		}

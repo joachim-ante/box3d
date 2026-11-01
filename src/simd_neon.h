@@ -128,6 +128,26 @@ static inline b3FloatW4 b3EqualsW4( b3FloatW4 a, b3FloatW4 b )
 	return vreinterpretq_f32_u32( vceqq_f32( a, b ) );
 }
 
+static inline b3FloatW4 b3LessEqW4( b3FloatW4 a, b3FloatW4 b )
+{
+	return vreinterpretq_f32_u32( vcleq_f32( a, b ) );
+}
+
+static inline b3FloatW4 b3GreaterEqW4( b3FloatW4 a, b3FloatW4 b )
+{
+	return vreinterpretq_f32_u32( vcgeq_f32( a, b ) );
+}
+
+static inline float b3HorizontalMinW4( b3FloatW4 a )
+{
+	return vminvq_f32( a );
+}
+
+static inline float b3HorizontalMaxW4( b3FloatW4 a )
+{
+	return vmaxvq_f32( a );
+}
+
 static inline bool b3AllZeroW4( b3FloatW4 a )
 {
 	// Create a zero vector for comparison
@@ -216,11 +236,6 @@ B3_FORCE_INLINE bool b3OverlapAABBV( b3AABBV a, b3AABBV b )
 	return vminvq_u32( vorrq_u32( test, vld1q_u32( laneMask ) ) ) != 0;
 }
 
-B3_FORCE_INLINE bool b3OverlapNode( b3AABBV av, const b3TreeNode* node )
-{
-	return b3OverlapAABBV( av, b3LoadAABBV( &node->aabb ) );
-}
-
 B3_FORCE_INLINE bool b3OverlapV( const b3AABB* a, const b3AABB* b )
 {
 	return b3OverlapAABBV( b3LoadAABBV( a ), b3LoadAABBV( b ) );
@@ -232,11 +247,6 @@ B3_FORCE_INLINE b3AABBV b3UnionAABBV( b3AABBV a, b3AABBV b )
 	result.lower = vminq_f32( a.lower, b.lower );
 	result.upper = vmaxq_f32( a.upper, b.upper );
 	return result;
-}
-
-B3_FORCE_INLINE b3AABBV b3UnionPairV( const b3TreeNode* pair )
-{
-	return b3UnionAABBV( b3LoadAABBV( &pair[0].aabb ), b3LoadAABBV( &pair[1].aabb ) );
 }
 
 B3_FORCE_INLINE void b3StoreAABBV( b3AABB* aabb, b3AABBV value, bool condition )
