@@ -3052,8 +3052,16 @@ b3TreeStats b3World_CastRay( b3WorldId worldId, b3Pos origin, b3Vec3 translation
 
 	for ( int i = 0; i < b3_bodyTypeCount; ++i )
 	{
-		b3TreeStats treeResult =
-			b3DynamicTree_RayCast( world->broadPhase.trees + i, &input, filter.maskBits, false, RayCastCallback, &worldContext );
+		const b3DynamicTree* tree = world->broadPhase.trees + i;
+		if ( tree->proxyCount == 0 )
+		{
+			continue;
+		}
+
+		// The leaf lanes carry the shape index and the callback applies the shape filter, so the
+		// proxy array is left alone. That is one cold cache line less per shape tested.
+		b3TreeView view = { tree->nodes, NULL };
+		b3TreeStats treeResult = b3TreeView_RayCast( &view, &input, filter.maskBits, false, RayCastCallback, &worldContext );
 		treeStats.nodeVisits += treeResult.nodeVisits;
 		treeStats.leafVisits += treeResult.leafVisits;
 
@@ -3124,8 +3132,16 @@ b3RayResult b3World_CastRayClosest( b3WorldId worldId, b3Pos origin, b3Vec3 tran
 
 	for ( int i = 0; i < b3_bodyTypeCount; ++i )
 	{
-		b3TreeStats treeResult =
-			b3DynamicTree_RayCast( world->broadPhase.trees + i, &input, filter.maskBits, false, RayCastCallback, &worldContext );
+		const b3DynamicTree* tree = world->broadPhase.trees + i;
+		if ( tree->proxyCount == 0 )
+		{
+			continue;
+		}
+
+		// The leaf lanes carry the shape index and the callback applies the shape filter, so the
+		// proxy array is left alone. That is one cold cache line less per shape tested.
+		b3TreeView view = { tree->nodes, NULL };
+		b3TreeStats treeResult = b3TreeView_RayCast( &view, &input, filter.maskBits, false, RayCastCallback, &worldContext );
 		result.nodeVisits += treeResult.nodeVisits;
 		result.leafVisits += treeResult.leafVisits;
 
