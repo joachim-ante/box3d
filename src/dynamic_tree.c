@@ -1397,23 +1397,30 @@ B3_FORCE_INLINE b3TreeStats b3RayCastTreeView( const b3TreeView* view, const b3R
 
 	const b3WideNode* nodes = view->nodes;
 
-	b3CastItem stack[B3_TREE_STACK_SIZE];
+	// Struct of arrays stack with four words of headroom, the push left packs four lanes and
+	// only advances by the hits. The child words keep their flags and are masked when popped.
+	uint32_t stackNodes[B3_TREE_STACK_SIZE + 4];
+	uint32_t stackFractions[B3_TREE_STACK_SIZE + 4];
 	int stackCount = 0;
-	stack[stackCount++] = B3_LITERAL( b3CastItem ){ B3_ROOT_NODE, 0.0f };
+	stackNodes[stackCount] = B3_ROOT_NODE;
+	stackFractions[stackCount] = 0;
+	stackCount += 1;
 
 	b3RayCastInput subInput = *input;
 
 	while ( stackCount > 0 )
 	{
-		b3CastItem item = stack[--stackCount];
-		if ( item.fraction > maxFraction )
+		stackCount -= 1;
+		float itemFraction;
+		memcpy( &itemFraction, stackFractions + stackCount, sizeof( itemFraction ) );
+		if ( itemFraction > maxFraction )
 		{
 			continue;
 		}
 
 		// Descend straight into the nearest child at each level. Only the farther children go
 		// through the stack, so the next node load does not wait on a store and a pop.
-		uint32_t nodeIndex = (uint32_t)item.nodeIndex;
+		uint32_t nodeIndex = stackNodes[stackCount] & B3_NODE_INDEX_MASK;
 		for ( ;; )
 		{
 			const b3WideNode* node = nodes + nodeIndex;
@@ -1450,12 +1457,16 @@ B3_FORCE_INLINE b3TreeStats b3RayCastTreeView( const b3TreeView* view, const b3R
 				break;
 			}
 
-			float fractions[4];
-			b3StoreW4( fractions, nearT );
+			union
+			{
+				float f[4];
+				uint32_t u[4];
+			} fractions;
+			b3StoreW4( fractions.f, nearT );
 
 			if ( b3IsLeaf( node ) )
 			{
-				if ( b3RayCastLeaf( view, node, hitMask, nearLane, fractions, maskBits, requireAllBits, callback, context,
+				if ( b3RayCastLeaf( view, node, hitMask, nearLane, fractions.f, maskBits, requireAllBits, callback, context,
 									hasProxies, &subInput, &maxFraction, &result ) == false )
 				{
 					return result;
@@ -1464,23 +1475,16 @@ B3_FORCE_INLINE b3TreeStats b3RayCastTreeView( const b3TreeView* view, const b3R
 				break;
 			}
 
-			// Push the farther children
-			int farLanes = hitMask & ~( 1 << nearLane );
-			if ( farLanes != 0 )
+			if ( stackCount > B3_TREE_STACK_SIZE )
 			{
-				if ( stackCount + 3 > B3_TREE_STACK_SIZE )
-				{
-					B3_ASSERT( stackCount + 3 <= B3_TREE_STACK_SIZE );
-					break;
-				}
-
-				do
-				{
-					int lane = (int)b3CTZ32( (uint32_t)farLanes );
-					farLanes &= farLanes - 1;
-					stack[stackCount++] = B3_LITERAL( b3CastItem ){ b3GetLaneIndex( node->child[lane] ), fractions[lane] };
-				} while ( farLanes != 0 );
+				B3_ASSERT( stackCount <= B3_TREE_STACK_SIZE );
+				break;
 			}
+
+			// Push the farther children without a branch on their count
+			int farLanes = hitMask & ~( 1 << nearLane );
+			b3CompressLanesW4( stackFractions + stackCount, fractions.u, farLanes );
+			stackCount += b3CompressLanesW4( stackNodes + stackCount, node->child, farLanes );
 
 			nodeIndex = node->child[nearLane] & B3_NODE_INDEX_MASK;
 		}
