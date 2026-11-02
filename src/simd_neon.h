@@ -8,6 +8,7 @@
 #include "box3d/types.h"
 
 #include <arm_neon.h>
+#include <string.h>
 
 // wide float holds 4 numbers
 typedef float32x4_t b3FloatW4;
@@ -177,10 +178,9 @@ static inline bool b3AnyTrueW4( b3FloatW4 mask )
 
 static inline int b3MoveMaskW4( b3FloatW4 mask )
 {
+	// Sign bit of each lane shifted to its bit position, then summed
 	const int32_t shifts[4] = { 0, 1, 2, 3 };
-	uint32x4_t bits = vshlq_u32( vshrq_n_u32( vreinterpretq_u32_f32( mask ), 31 ), vld1q_s32( shifts ) );
-	uint32x2_t p = vorr_u32( vget_low_u32( bits ), vget_high_u32( bits ) );
-	return (int)( vget_lane_u32( p, 0 ) | vget_lane_u32( p, 1 ) );
+	return (int)vaddvq_u32( vshlq_u32( vshrq_n_u32( vreinterpretq_u32_f32( mask ), 31 ), vld1q_s32( shifts ) ) );
 }
 
 // Bit per lane where the given bit of the 32-bit word is set
@@ -228,9 +228,9 @@ static inline b3FloatW4 b3EmbedIndexW4( b3FloatW4 value, int baseIndex, int bitC
 
 static inline int b3MinIndexW4( b3FloatW4 a, int bitCount )
 {
-	float32x2_t m = vmin_f32( vget_low_f32( a ), vget_high_f32( a ) );
-	m = vpmin_f32( m, m );
-	uint32_t bits = vget_lane_u32( vreinterpret_u32_f32( m ), 0 );
+	float m = vminvq_f32( a );
+	uint32_t bits;
+	memcpy( &bits, &m, sizeof( bits ) );
 	return (int)( bits & ( ( 1u << bitCount ) - 1 ) );
 }
 
