@@ -1176,6 +1176,7 @@ void b3Body_SetTransform( b3BodyId bodyId, b3Pos position, b3Quat rotation )
 		b3Shape* shape = b3Array_Get( world->shapes, shapeId );
 		b3AABB aabb = b3ComputeFatShapeAABB( shape, transform, speculativeDistance );
 		shape->aabb = aabb;
+		shape->bodyTransform = transform;
 
 		b3AABB* shapeFatAABB = world->fatAABBs.data + shapeId;
 		if ( b3AABB_Contains( *shapeFatAABB, aabb ) == false )

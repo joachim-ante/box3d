@@ -2799,8 +2799,7 @@ static bool b3TreeOverlapCallback( int proxyId, uint64_t userData, void* context
 	}
 
 	// Re-center on the query origin so the overlap test stays in float precision far from the origin
-	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
-	b3Transform transform = b3ToRelativeTransform( b3GetBodyTransformQuick( world, body ), worldContext->origin );
+	b3Transform transform = b3ToRelativeTransform( shape->bodyTransform, worldContext->origin );
 
 	bool overlapping = b3OverlapShape( shape, transform, &worldContext->proxy );
 	if ( overlapping == false )
@@ -2894,9 +2893,7 @@ static bool TreeCollideCallback( int proxyId, uint64_t userData, void* context )
 	}
 
 	// Re-center on the query origin, the mover and the resulting planes are origin relative
-	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
-	b3WorldTransform bodyTransform = b3GetBodyTransformQuick( world, body );
-	b3Transform transform = b3ToRelativeTransform( bodyTransform, worldContext->origin );
+	b3Transform transform = b3ToRelativeTransform( shape->bodyTransform, worldContext->origin );
 
 	b3PlaneResult buffer[64];
 	int count = b3CollideMover( buffer, 64, shape, transform, &worldContext->mover );
@@ -2987,9 +2984,7 @@ static float RayCastCallback( const b3RayCastInput* input, int proxyId, uint64_t
 		return input->maxFraction;
 	}
 
-	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
-	b3WorldTransform bodyTransform = b3GetBodyTransformQuick( world, body );
-	b3Transform transform = b3ToRelativeTransform( bodyTransform, worldContext->origin );
+	b3Transform transform = b3ToRelativeTransform( shape->bodyTransform, worldContext->origin );
 
 	b3RayCastInput localInput = *input;
 	localInput.origin = b3Vec3_zero;
@@ -3193,8 +3188,7 @@ static float b3ShapeCastCallback( const b3BoxCastInput* input, int proxyId, uint
 	localInput.maxFraction = input->maxFraction;
 
 	// Re-center on the query origin so the per-shape cast stays in float precision far from the origin
-	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
-	b3Transform transform = b3ToRelativeTransform( b3GetBodyTransformQuick( world, body ), worldContext->origin );
+	b3Transform transform = b3ToRelativeTransform( shape->bodyTransform, worldContext->origin );
 
 	b3CastOutput output = b3ShapeCastShape( shape, transform, &localInput );
 
@@ -3337,8 +3331,7 @@ static float MoverCastCallback( const b3BoxCastInput* input, int proxyId, uint64
 	localInput.maxFraction = input->maxFraction;
 
 	// Re-center on the query origin so the per-shape cast stays in float precision far from the origin
-	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
-	b3Transform transform = b3ToRelativeTransform( b3GetBodyTransformQuick( world, body ), worldContext->origin );
+	b3Transform transform = b3ToRelativeTransform( shape->bodyTransform, worldContext->origin );
 
 	b3CastOutput output = b3ShapeCastShape( shape, transform, &localInput );
 	if ( output.fraction == 0.0f )

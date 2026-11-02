@@ -83,6 +83,7 @@ static void b3UpdateShapeAABBs( b3Shape* shape, b3AABB* fatAABB, b3WorldTransfor
 
 	b3AABB aabb = b3ComputeFatShapeAABB( shape, transform, speculativeDistance );
 	shape->aabb = aabb;
+	shape->bodyTransform = transform;
 
 	// Smaller margin for static bodies. Cannot be zero due to TOI tolerance.
 	float margin = proxyType == b3_staticBody ? speculativeDistance : aabbMargin;
@@ -182,6 +183,7 @@ static b3Shape* b3CreateShapeInternal( b3World* world, b3Body* body, b3WorldTran
 	shape->localCentroid = b3GetShapeCentroid( shape );
 	shape->aabbMargin = b3ComputeShapeMargin( shape );
 	shape->aabb = (b3AABB){ b3Vec3_zero, b3Vec3_zero };
+	shape->bodyTransform = bodyTransform;
 	world->fatAABBs.data[shapeId] = (b3AABB){ b3Vec3_zero, b3Vec3_zero };
 	shape->nameId = b3AddName( &world->names, def->name );
 	shape->generation += 1;

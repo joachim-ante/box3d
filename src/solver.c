@@ -540,6 +540,7 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 
 		// Store this to avoid double computation in the case there is no impact event
 		fastShape->aabb = box2;
+		fastShape->bodyTransform = fastBodySim->transform;
 
 		// No continuous collision for meshes
 		if ( fastShape->type == b3_meshShape || fastShape->type == b3_heightShape )
@@ -616,6 +617,7 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 			// Must recompute aabb at the interpolated transform
 			b3AABB aabb = b3ComputeFatShapeAABB( shape, transform, speculativeScalar );
 			shape->aabb = aabb;
+			shape->bodyTransform = transform;
 
 			b3AABB* shapeFatAABB = world->fatAABBs.data + shapeId;
 			if ( b3AABB_Contains( *shapeFatAABB, aabb ) == false )
@@ -863,6 +865,7 @@ static void b3FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
 
 				b3AABB aabb = b3ComputeFatShapeAABB( shape, transform, speculativeScalar );
 				shape->aabb = aabb;
+				shape->bodyTransform = transform;
 
 				b3AABB* shapeFatAABB = world->fatAABBs.data + shapeId;
 				if ( b3AABB_Contains( *shapeFatAABB, aabb ) == false )

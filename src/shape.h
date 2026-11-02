@@ -40,6 +40,10 @@ typedef struct b3Shape
 	b3AABB aabb;
 	b3Vec3 localCentroid;
 
+	// The body transform the AABB was computed with. Queries read it here instead of chasing
+	// the body and body sim, which are two more cold cache lines per shape tested.
+	b3WorldTransform bodyTransform;
+
 	int materialCount;
 	b3SurfaceMaterial material;
 	b3SurfaceMaterial* materials;
