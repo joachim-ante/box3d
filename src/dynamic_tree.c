@@ -1309,61 +1309,6 @@ typedef struct b3CastItem
 	float fraction;
 } b3CastItem;
 
-// Tests the hit lanes of a leaf node, the nearest lane first so the max fraction shrinks before
-// the others are tested. Returns false when the callback terminates the cast.
-static bool b3RayCastLeaf( const b3TreeView* view, const b3WideNode* node, int hitMask, int nearLane, const float* fractions,
-						   uint64_t maskBits, bool requireAllBits, b3TreeRayCastCallbackFcn* callback, void* context,
-						   bool hasProxies, b3RayCastInput* subInput, float* maxFraction, b3TreeStats* result )
-{
-	int lanes = hitMask;
-	int lane = nearLane;
-	for ( ;; )
-	{
-		lanes &= ~( 1 << lane );
-
-		if ( fractions[lane] <= *maxFraction )
-		{
-			int proxyId = b3GetLaneIndex( node->child[lane] );
-			uint64_t userData = node->userData[lane];
-			bool accept = true;
-			if ( hasProxies )
-			{
-				const b3TreeProxy* proxy = view->proxies + proxyId;
-				accept = b3TestCategory( proxy->categoryBits, maskBits, requireAllBits );
-				userData = proxy->userData;
-			}
-
-			if ( accept )
-			{
-				subInput->maxFraction = *maxFraction;
-
-				float value = callback( subInput, proxyId, userData, context );
-				result->leafVisits += 1;
-
-				// The user may return -1 to indicate this shape should be skipped
-
-				if ( value == 0.0f )
-				{
-					// The client has terminated the ray cast.
-					return false;
-				}
-
-				if ( 0.0f < value && value <= *maxFraction )
-				{
-					*maxFraction = value;
-				}
-			}
-		}
-
-		if ( lanes == 0 )
-		{
-			return true;
-		}
-
-		lane = (int)b3CTZ32( (uint32_t)lanes );
-	}
-}
-
 // Four lane slab test. The nearest child is descended directly and the other hits go through
 // the stack in lane order.
 B3_FORCE_INLINE b3TreeStats b3RayCastTreeView( const b3TreeView* view, const b3RayCastInput* input, uint64_t maskBits,
@@ -1466,10 +1411,54 @@ B3_FORCE_INLINE b3TreeStats b3RayCastTreeView( const b3TreeView* view, const b3R
 
 			if ( b3IsLeaf( node ) )
 			{
-				if ( b3RayCastLeaf( view, node, hitMask, nearLane, fractions.f, maskBits, requireAllBits, callback, context,
-									hasProxies, &subInput, &maxFraction, &result ) == false )
+				// Test the hit lanes, the nearest first so the max fraction shrinks before the
+				// others are tested
+				int lanes = hitMask;
+				int lane = nearLane;
+				for ( ;; )
 				{
-					return result;
+					lanes &= ~( 1 << lane );
+
+					if ( fractions.f[lane] <= maxFraction )
+					{
+						int proxyId = b3GetLaneIndex( node->child[lane] );
+						uint64_t userData = node->userData[lane];
+						bool accept = true;
+						if ( hasProxies )
+						{
+							const b3TreeProxy* proxy = view->proxies + proxyId;
+							accept = b3TestCategory( proxy->categoryBits, maskBits, requireAllBits );
+							userData = proxy->userData;
+						}
+
+						if ( accept )
+						{
+							subInput.maxFraction = maxFraction;
+
+							float value = callback( &subInput, proxyId, userData, context );
+							result.leafVisits += 1;
+
+							// The user may return -1 to indicate this shape should be skipped
+
+							if ( value == 0.0f )
+							{
+								// The client has terminated the ray cast.
+								return result;
+							}
+
+							if ( 0.0f < value && value <= maxFraction )
+							{
+								maxFraction = value;
+							}
+						}
+					}
+
+					if ( lanes == 0 )
+					{
+						break;
+					}
+
+					lane = (int)b3CTZ32( (uint32_t)lanes );
 				}
 
 				break;
