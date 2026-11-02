@@ -6,6 +6,7 @@
 #include "body.h"
 #include "broad_phase.h"
 #include "contact.h"
+#include "hull.h"
 #include "physics_world.h"
 #include "recording.h"
 #include "sensor.h"
@@ -870,6 +871,7 @@ b3CastOutput b3RayCastShape( const b3Shape* shape, b3Transform transform, const 
 			output = b3RayCastSphere( &shape->sphere, &localInput );
 			break;
 		case b3_hullShape:
+			b3PrefetchHullPlanes( shape->hull );
 			output = b3RayCastHull( shape->hull, &localInput );
 			break;
 		case b3_meshShape:
